@@ -1,0 +1,24 @@
+{
+  "seed": 42,
+  "environment": {
+    "sizes": [5, 7], "max_size": 7,
+    "wall_probability": 0.12, "hole_probability": 0.10,
+    "ice_probability": 0.35, "slip_probability": 0.30,
+    "max_steps": 64,
+    "goal_reward": 1.0, "hole_reward": -1.0,
+    "step_reward": -0.01, "collision_reward": -0.02
+  },
+  "model": {"layers": 4, "width": 128, "heads": 4, "ff_multiplier": 4},
+  "data": {"train_maps": 2000, "validation_maps": 24, "test_maps": 48},
+  "pretrain": {"steps": 1500, "batch_size": 64, "learning_rate": 0.0003},
+  "sft": {"steps": 2000, "batch_size": 64, "learning_rate": 0.0002},
+  "grpo": {
+    "steps": 250, "prompts": 8, "group_size": 4,
+    "learning_rate": 0.00003, "epochs": 2, "microbatch": 128,
+    "clip_epsilon": 0.2, "kl_coefficient": 0.02,
+    "temperature": 1.0, "advantage_epsilon": 0.000001
+  },
+  "training": {"log_every": 50, "checkpoint_every": 250, "gradient_clip": 1.0, "weight_decay": 0.01},
+  "evaluation": {"trials_per_map": 8, "world_samples": 512, "batch_size": 128},
+  "display": {"animation_delay": 0.2}
+}
