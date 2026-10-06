@@ -90,7 +90,7 @@ code("""
     from html import escape
     from maze_training.runtime import load_model, choose_device, seed_runtime
     from maze_training.data import build_maps, build_expert_examples
-    from scripts.summarize_diagnosis import summarize_results
+    from scripts.summarize_diagnosis import summarize_results, build_report_relative_path
     from maze_training.environment import (
         ACTION_NAMES, WALL, GOAL, generate_maze, compute_goal_distances,
         move_nominal, step_environment, find_min_cost_path, calculate_path_cost,
@@ -454,6 +454,7 @@ markdown("""
     `report.md`에는 비교한 모델 중 권장 모델과 그 근거, 반복 지점의 확률,
     SFT 보정 상태, 다음 변경 우선순위를 자동 작성합니다. 검증 결과에 따른 권장이며 최종 테스트 성능은 별개입니다.
     Colab에서는 결과 ZIP을 자동으로 다운로드합니다. Drive에도 결과 폴더를 저장합니다.
+    보고서는 프로젝트와 Drive의 `docs/진단보고서/YYYY-MM-DD/`에 한국 시간 기준으로 따로 저장합니다.
 """)
 
 code("""
@@ -483,6 +484,11 @@ code("""
         print("저장:", destination)
     report = summarize_results(manifest, artifacts["summary.json"], artifacts["trajectories.json"])
     (RESULT_DIR / "report.md").write_text(report, encoding="utf-8")
+    report_relative_path = build_report_relative_path(manifest)
+    report_path = REPO_ROOT / report_relative_path
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(report, encoding="utf-8")
+    print("날짜별 보고서 저장:", report_path)
     from IPython.display import Markdown
     display(Markdown(report))
     archive_path = shutil.make_archive(str(RESULT_DIR), "zip", RESULT_DIR)
@@ -490,7 +496,11 @@ code("""
         saved_dir = CHECKPOINT_ROOT / "diagnosis_results" / RESULT_DIR.name
         shutil.copytree(RESULT_DIR, saved_dir)
         shutil.copy2(archive_path, saved_dir.parent)
+        drive_report_path = CHECKPOINT_ROOT / report_relative_path
+        drive_report_path.parent.mkdir(parents=True, exist_ok=True)
+        drive_report_path.write_text(report, encoding="utf-8")
         print("Drive 결과 저장:", saved_dir)
+        print("Drive 날짜별 보고서:", drive_report_path)
     print("전체 결과 ZIP:", archive_path)
     if IN_COLAB:
         from google.colab import files

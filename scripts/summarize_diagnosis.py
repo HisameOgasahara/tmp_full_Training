@@ -3,7 +3,14 @@
 import argparse
 import json
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from maze_training.environment import ACTION_NAMES
+
+
+def build_report_relative_path(manifest):
+    timestamp = datetime.fromisoformat(manifest["created_at_utc"].replace("Z", "+00:00"))
+    korean_time = timestamp.astimezone(timezone(timedelta(hours=9)))
+    return Path("docs") / "진단보고서" / korean_time.strftime("%Y-%m-%d") / korean_time.strftime("%H%M%S_%f_진단보고서.md")
 
 
 def find_cycle(record):
@@ -32,7 +39,9 @@ def summarize_results(manifest, summary, trajectories):
             })
     best = max(candidates, key=lambda row: (row["success_rate"], row["mean_return"]))
     sft = next(row for row in candidates if row["model"] == "SFT")
-    lines = ["# 미로 학습 진단 결과", "",
+    timestamp = datetime.fromisoformat(manifest["created_at_utc"].replace("Z", "+00:00"))
+    korean_time = timestamp.astimezone(timezone(timedelta(hours=9)))
+    lines = ["# 미로 학습 진단 결과", "", f"진단 일시: {korean_time:%Y-%m-%d %H:%M:%S} (한국 시간)", "",
              f"**권장 모델: {best['model']}**. 같은 검증 지도 {best['maps']}개에서 도착률을 우선하고 평균 보상으로 동점을 비교했습니다.", "",
              "## 모델 비교", "",
              "| 모델 | 업데이트 | 도착률 | 반복률 | 평균 보상 | 개선 / 퇴행 | 공통 성공 비용 차이 |",
