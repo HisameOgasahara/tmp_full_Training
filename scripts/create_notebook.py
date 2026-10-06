@@ -16,26 +16,22 @@ def code(source):
 
 
 markdown("""
-    # 미끄러운 미로: 사전학습 → SFT → GRPO
+    # 비용이 다른 미로: 사전학습 → SFT → PPO
 
-    환경의 이동 규칙, 목표로 가는 행동, 위험과 이동 비용을 고려한 행동을 순서대로 학습합니다.
-    Colab에서 T4 GPU를 선택하고 준비 셀부터 실행하세요.
-    각 단계는 학습 셀과 바로 아래 평가 셀을 실행해 모델을 직접 확인한 뒤 다음 단계로 넘어갑니다.
+    벽으로 막힌 미로에서 목표로 이동합니다. 일반 바닥은 비용 1, 늪은 비용 4입니다.
+    사전학습은 다음 위치와 비용, SFT는 가장 짧은 경로, PPO는 도착과 총비용을 학습합니다.
+    각 단계의 실행 화면에서 모델을 확인한 뒤 다음 단계로 넘어가세요.
 
-    - 사전학습: 행동을 지정하고 다음 위치의 예측 확률과 실제 이동을 비교합니다.
-    - SFT: 미끄러짐을 끄고 켜서 목표로 이동하는 행동을 확인합니다.
-    - GRPO: 같은 지도에서 SFT와 GRPO 모델을 나란히 실행합니다.
-
-    [환경 규칙과 단계별 목표](https://github.com/HisameOgasahara/tmp_full_Training/blob/main/docs/학습설계.md)
+    [규칙과 학습 구조](https://github.com/HisameOgasahara/tmp_full_Training/blob/main/docs/학습설계.md)
 """)
+
 markdown("""
-    ## 0. 최신 코드 준비
+    ## 0. 준비
 
-    Colab 런타임을 T4 GPU로 설정한 뒤 실행하세요. 이 셀은 최신 `main`을 새 폴더에 복제합니다.
-    준비 완료 후 표시되는 커밋을 실험 기록에 저장하세요. 한 실험에서는 처음 가져온 코드를 계속 사용합니다.
-    Colab에 설치된 PyTorch를 사용합니다.
+    Colab 런타임을 T4 GPU로 설정하세요.
 """)
-code('''
+
+code("""
     import importlib
     import io
     import os
@@ -48,7 +44,7 @@ code('''
     import urllib.request
 
     REPO_URL = "https://github.com/HisameOgasahara/tmp_full_Training.git"
-    REPO_ROOT = Path(tempfile.mkdtemp(prefix="slippery_maze_")) / "repository"
+    REPO_ROOT = Path(tempfile.mkdtemp(prefix="weighted_maze_")) / "repository"
     subprocess.run(["git", "clone", "--depth", "1", "--branch", "main", REPO_URL, str(REPO_ROOT)], check=True)
     REVISION = subprocess.check_output(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], text=True).strip()
 
@@ -85,227 +81,221 @@ code('''
     print("코드 위치:", REPO_ROOT)
     print("PyTorch:", torch.__version__)
     print("장치:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU (t4 프로필은 GPU 권장)")
-''')
+""")
+
 markdown("""
     ### 설정
 
-    전체 학습은 `PROFILE = "t4"`, 짧은 셀 연결 확인은 `PROFILE = "smoke"`로 실행하세요.
-    중단한 단계를 이어가려면 같은 설정과 출력 폴더에서 `RESUME = True`를 사용합니다.
-    새 단계로 넘어갈 때는 `False`로 설정하세요. 같은 단계의 새 학습은 해당 체크포인트와 로그를 덮어씁니다.
+    `t4`는 전체 학습, `smoke`는 짧은 실행입니다.
+    중단한 사전학습 또는 SFT를 이어갈 때 `RESUME = True`를 사용하고, 새 단계는 `False`로 설정하세요.
+    이번 환경의 저장 위치는 `weighted_maze_runs`입니다.
 """)
-code('''
-    PROFILE = "t4"  # "smoke"로 바꾸면 연결 확인용 짧은 실행
+
+code("""
+    PROFILE = "t4"
     RESUME = False
     CONFIG_PATH = str(REPO_ROOT / "configs" / f"{PROFILE}.json")
-    OUTPUT_ROOT = Path("/content/maze_runs") if Path("/content").exists() else REPO_ROOT / "runs"
+    OUTPUT_ROOT = Path("/content/weighted_maze_runs") if Path("/content").exists() else REPO_ROOT / "runs" / "weighted_maze"
     OUTPUT_DIR = OUTPUT_ROOT / PROFILE
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     from maze_training.training import run_stage
     from maze_training.notebook import report_world, report_navigation, show_training_curve, launch_world, launch_navigation
-    from maze_training.runtime import read_config, seed_runtime, create_model, choose_device, save_checkpoint
+    from maze_training.runtime import read_config, seed_runtime, create_model, choose_device, save_checkpoint, write_json
 
     config = read_config(CONFIG_PATH)
     model_for_size, _ = create_model(config, choose_device())
     print("파라미터:", f"{sum(p.numel() for p in model_for_size.parameters()):,}")
-    print("설정:", CONFIG_PATH)
-    print("체크포인트:", OUTPUT_DIR)
+    print("저장 위치:", OUTPUT_DIR)
     del model_for_size
-''')
-markdown("""
-    ### 선택: Google Drive에 저장
-
-    세션 종료 후 모델을 다시 사용하려면 학습 전에 `USE_DRIVE = True`로 설정하고 실행하세요.
-    Drive를 연결하면 `/content/drive/MyDrive/maze_training/프로필명`에 저장합니다.
 """)
-code('''
+
+markdown("""
+    ### 선택: Drive 저장
+
+    학습 전에 `USE_DRIVE = True`로 설정하면 Drive에 저장합니다.
+""")
+
+code("""
     USE_DRIVE = False
     if USE_DRIVE:
         from google.colab import drive
         drive.mount("/content/drive")
-        OUTPUT_DIR = Path("/content/drive/MyDrive/maze_training") / PROFILE
+        OUTPUT_DIR = Path("/content/drive/MyDrive/weighted_maze_training") / PROFILE
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     print("저장 위치:", OUTPUT_DIR)
-''')
-markdown("""
-    ## 1. 사전학습 — 행동의 결과를 예측
-
-    지도·현재 위치·행동으로 다음 위치의 확률 분포를 예측합니다.
-    무작위 이동의 전이 기록으로 벽 충돌과 미끄러짐의 규칙을 학습합니다.
 """)
-code('''
+
+markdown("""
+    ## 1. 사전학습 — 다음 위치와 이동 비용 예측
+
+    무작위 위치·행동의 실제 이동 기록을 학습합니다.
+    벽 충돌은 제자리, 일반 바닥과 늪은 서로 다른 비용으로 처리됩니다.
+""")
+
+code("""
     PRETRAIN_PATH = run_stage("pretrain", CONFIG_PATH, OUTPUT_DIR, resume=RESUME)
     show_training_curve(OUTPUT_DIR, "pretrain")
-''')
+""")
+
 markdown("""
     ### 1단계 평가와 직접 실행
 
-    평가 셀을 실행한 뒤 화면에서 행동을 선택하고 한 걸음씩 이동하세요.
-    모델의 예측 분포와 환경의 정확한 전이확률, 실제 다음 위치를 비교합니다.
-    TV distance와 KL은 낮을수록, 실제 가능한 위치에 부여한 확률은 높을수록 좋습니다.
-    확인을 마치면 2단계 학습 셀을 실행하세요.
+    다음 위치 정확도와 비용 오차를 확인하세요. 행동을 바꾸면 예측이 갱신됩니다.
+    실제 한 걸음을 실행해 예측 위치·비용과 환경 결과를 비교하세요.
 """)
-code('''
+
+code("""
     PRETRAIN_PATH = str(OUTPUT_DIR / "pretrain.pt")
     world_report = report_world(PRETRAIN_PATH)
     world_demo = launch_world(PRETRAIN_PATH)
-''')
-markdown("""
-    ## 2. SFT — 목표로 이동하는 행동을 모방
-
-    사전학습 체크포인트를 불러와 BFS가 선택한 다음 행동을 학습합니다.
-    BFS는 벽·구멍을 피하는 최단 경로를 구하고 미끄러짐은 끈 조건으로 계획합니다.
-    목표에 도달할 수 있는 여러 현재 위치에서 행동을 학습합니다.
 """)
-code('''
+
+markdown("""
+    ## 2. SFT — 벽을 피해 목표로 이동
+
+    BFS의 다음 행동을 모방합니다. BFS는 이동 횟수를 최소화합니다.
+    학습 지도는 BFS 경로보다 길지만 비용이 작은 우회로를 함께 갖습니다.
+""")
+
+code("""
     SFT_PATH = run_stage("sft", CONFIG_PATH, OUTPUT_DIR, resume=RESUME)
     show_training_curve(OUTPUT_DIR, "sft")
-''')
+""")
+
 markdown("""
     ### 2단계 평가와 직접 실행
 
-    평가 셀을 실행해 미끄러짐을 끈 조건과 켠 조건의 도착률·추락률·평균 보상을 비교하세요.
-    실행 화면에서 한 걸음씩 이동하거나 자동 실행을 사용합니다.
-    ‘미끄러짐 켜기’를 바꾼 뒤 ‘지도 초기화’를 눌러 같은 지도에서 다시 실행하세요.
+    BFS는 최단 경로, Dijkstra는 최소 비용 경로의 비교 기준입니다.
+    도착률을 확인하고, 도착한 경로의 비용과 이동 횟수를 비교하세요.
 """)
-code('''
+
+code("""
     SFT_PATH = str(OUTPUT_DIR / "sft.pt")
-    sft_dry_report = report_navigation({"SFT": SFT_PATH}, CONFIG_PATH, slippery=False)
-    sft_report = report_navigation({"SFT": SFT_PATH}, CONFIG_PATH, slippery=True)
+    sft_report = report_navigation({"SFT": SFT_PATH}, CONFIG_PATH)
     sft_demo = launch_navigation({"SFT": SFT_PATH}, CONFIG_PATH)
-''')
-markdown('''
-    ### 2단계 추가 학습 — 기본 길찾기 안정시키기
+""")
 
-    위 평가에서 미끄러짐을 끈 도착률과 충돌 수를 확인하세요.
-    아래 셀은 기존 SFT를 총 4,000회까지 이어 학습하고 두 조건을 다시 평가합니다.
-    더 이어가려면 `SFT_TOTAL_STEPS`를 6,000처럼 늘리고 같은 셀을 실행하세요.
-    기존 모델이 있는 세션에서는 준비·설정 셀과 저장 위치를 맞춘 뒤 이 셀부터 실행할 수 있습니다.
-''')
-code('''
-    SFT_TOTAL_STEPS = 4000 if PROFILE == "t4" else 8
-    SFT_PATH = run_stage("sft", CONFIG_PATH, OUTPUT_DIR, steps=SFT_TOTAL_STEPS, resume=True)
-    show_training_curve(OUTPUT_DIR, "sft")
-    sft_dry_report = report_navigation({"SFT": SFT_PATH}, CONFIG_PATH, slippery=False)
-    sft_report = report_navigation({"SFT": SFT_PATH}, CONFIG_PATH, slippery=True)
-    sft_demo = launch_navigation({"SFT": SFT_PATH}, CONFIG_PATH)
-''')
-markdown('''
-    ## 3. GRPO — 개선된 SFT에서 짧게 학습하고 비교
+markdown("""
+    ### 선택: SFT 추가 학습
 
-    아래 셀을 실행하면 현재 `sft.pt`에서 GRPO를 새로 시작하고 첫 50회 뒤 검증합니다.
-    새 실험은 `grpo_refinement` 폴더에 저장합니다. 이 시작 셀을 다시 실행하면 해당 실험을 다시 시작합니다.
-    이어 학습하려면 다음의 **50회 더 학습** 셀을 사용하세요.
+    기본 길찾기를 더 학습하려면 `EXTEND_SFT = True`로 설정하세요.
+    `SFT_TOTAL_STEPS`는 기존 학습을 포함한 총 업데이트 수입니다.
+""")
 
-    검증 평균 보상이 높은 모델을 `selected_policy.pt`로 보관하고 동점이면 도착률로 선택합니다.
-    시작 SFT도 선택 후보에 포함합니다. 각 구간의 GRPO 모델과 검증 결과도 따로 저장합니다.
-    `useful_group_fraction`은 보상 차이가 있어 학습에 사용한 그룹의 비율입니다.
-''')
-code('''
+code("""
+    EXTEND_SFT = False
+    SFT_TOTAL_STEPS = 6000 if PROFILE == "t4" else 8
+    if EXTEND_SFT:
+        SFT_PATH = run_stage("sft", CONFIG_PATH, OUTPUT_DIR, steps=SFT_TOTAL_STEPS, resume=True)
+        show_training_curve(OUTPUT_DIR, "sft")
+        sft_report = report_navigation({"SFT": SFT_PATH}, CONFIG_PATH)
+""")
+
+markdown("""
+    ## 3. PPO — 도착을 유지하며 총비용 줄이기
+
+    현재 SFT에서 시작하고, 가치 출력과 GAE로 각 행동을 평가합니다.
+    아래 셀은 PPO를 새로 시작해 첫 50회 뒤 검증합니다. 이 셀을 다시 실행하면 실험을 다시 시작합니다.
+    이어 학습은 다음 **50회 더 학습** 셀을 사용하세요.
+
+    시작 SFT와 구간별 PPO 중 도착률이 가장 높은 모델을 선택하고, 동점이면 평균 보상으로 선택합니다.
+    선택 모델은 `ppo_refinement/selected_policy.pt`에 저장합니다.
+""")
+
+code("""
     import json
-    from maze_training.runtime import write_json
 
     SFT_PATH = str(OUTPUT_DIR / "sft.pt")
-    GRPO_DIR = OUTPUT_DIR / "grpo_refinement"
-    GRPO_DIR.mkdir(parents=True, exist_ok=True)
-    GRPO_INTERVAL = 50 if PROFILE == "t4" else 1
-    GRPO_LIMIT = config["grpo"]["steps"]
-    SELECTION_PATH = GRPO_DIR / "selection.json"
-    SELECTED_PATH = GRPO_DIR / "selected_policy.pt"
+    PPO_DIR = OUTPUT_DIR / "ppo_refinement"
+    PPO_DIR.mkdir(parents=True, exist_ok=True)
+    PPO_INTERVAL = 50 if PROFILE == "t4" else 1
+    PPO_LIMIT = config["ppo"]["steps"]
+    SELECTION_PATH = PPO_DIR / "selection.json"
+    SELECTED_PATH = PPO_DIR / "selected_policy.pt"
     baseline_report = report_navigation({"SFT": SFT_PATH}, CONFIG_PATH)
-    baseline_metrics = baseline_report["policies"]["SFT"]
-    shutil.copy2(SFT_PATH, GRPO_DIR / "initial_sft.pt")
+    shutil.copy2(SFT_PATH, PPO_DIR / "initial_sft.pt")
     shutil.copy2(SFT_PATH, SELECTED_PATH)
-    write_json(SELECTION_PATH, {
-        "source": "SFT", "step": 0,
-        "metrics": baseline_metrics,
-    })
+    write_json(SELECTION_PATH, {"source": "SFT", "step": 0, "metrics": baseline_report["policies"]["SFT"]})
 
-    def evaluate_and_save_grpo():
-        candidate_path = GRPO_DIR / "grpo.pt"
+    def evaluate_and_save_ppo():
+        candidate_path = PPO_DIR / "ppo.pt"
         payload = torch.load(candidate_path, map_location="cpu", weights_only=True)
         step = payload["step"]
         del payload
-        report = report_navigation({
-            "시작 SFT": str(GRPO_DIR / "initial_sft.pt"),
-            "GRPO": str(candidate_path),
-        }, CONFIG_PATH)
-        metrics = report["policies"]["GRPO"]
-        shutil.copy2(candidate_path, GRPO_DIR / f"grpo_{step:04d}.pt")
-        write_json(GRPO_DIR / f"validation_{step:04d}.json", report)
+        report = report_navigation({"시작 SFT": str(PPO_DIR / "initial_sft.pt"), "PPO": str(candidate_path)}, CONFIG_PATH)
+        metrics = report["policies"]["PPO"]
+        shutil.copy2(candidate_path, PPO_DIR / f"ppo_{step:04d}.pt")
+        write_json(PPO_DIR / f"validation_{step:04d}.json", report)
         selected = json.loads(SELECTION_PATH.read_text(encoding="utf-8"))
-        score = lambda values: (values["mean_return"], values["success_rate"])
+        score = lambda values: (values["success_rate"], values["mean_return"])
         if score(metrics) > score(selected["metrics"]):
             shutil.copy2(candidate_path, SELECTED_PATH)
-            selected = {"source": "GRPO", "step": step, "metrics": metrics}
+            selected = {"source": "PPO", "step": step, "metrics": metrics}
             write_json(SELECTION_PATH, selected)
-        print(f"검증 선택: {selected['source']} {selected['step']}회 | "
-              f"평균 보상 {selected['metrics']['mean_return']:.3f} | "
-              f"도착률 {selected['metrics']['success_rate']:.1%}")
+        print(f"검증 선택: {selected['source']} {selected['step']}회 | 도착률 {selected['metrics']['success_rate']:.1%} | 평균 보상 {selected['metrics']['mean_return']:.3f}")
         return report
 
-    GRPO_PATH = run_stage("grpo", CONFIG_PATH, GRPO_DIR,
-                          steps=min(GRPO_INTERVAL, GRPO_LIMIT), initialize_from=SFT_PATH)
-    comparison = evaluate_and_save_grpo()
-    show_training_curve(GRPO_DIR, "grpo")
-''')
-markdown('''
-    ### 50회 더 학습 — 이 셀을 반복 실행
+    PPO_PATH = run_stage("ppo", CONFIG_PATH, PPO_DIR, steps=min(PPO_INTERVAL, PPO_LIMIT), initialize_from=SFT_PATH)
+    comparison = evaluate_and_save_ppo()
+    show_training_curve(PPO_DIR, "ppo")
+""")
 
-    현재 저장된 GRPO에서 50회를 더 학습하고 검증 선택 모델을 갱신합니다.
-    기본 총 250회까지 반복할 수 있습니다. `smoke`에서는 한 번에 1회씩 총 2회 실행합니다.
-    구간별 도착률·추락률·평균 보상과 선택된 모델을 확인하세요.
-''')
-code('''
-    payload = torch.load(GRPO_DIR / "grpo.pt", map_location="cpu", weights_only=True)
+markdown("""
+    ### 50회 더 학습
+
+    반복 실행하면 50회씩 총 250회까지 이어 학습·검증합니다.
+    `smoke`에서는 한 번에 1회씩 총 2회 실행합니다.
+""")
+
+code("""
+    payload = torch.load(PPO_DIR / "ppo.pt", map_location="cpu", weights_only=True)
     completed_steps = payload["step"]
     del payload
-    next_steps = min(completed_steps + GRPO_INTERVAL, GRPO_LIMIT)
+    next_steps = min(completed_steps + PPO_INTERVAL, PPO_LIMIT)
     if next_steps > completed_steps:
-        GRPO_PATH = run_stage("grpo", CONFIG_PATH, GRPO_DIR, steps=next_steps, resume=True)
-        comparison = evaluate_and_save_grpo()
-        show_training_curve(GRPO_DIR, "grpo")
+        PPO_PATH = run_stage("ppo", CONFIG_PATH, PPO_DIR, steps=next_steps, resume=True)
+        comparison = evaluate_and_save_ppo()
+        show_training_curve(PPO_DIR, "ppo")
     else:
-        print(f"GRPO {completed_steps}회 완료. 아래 실행 화면과 최종 테스트로 이동하세요.")
-''')
-markdown('''
-    ### 3단계 평가와 나란히 실행
+        print(f"PPO {completed_steps}회 완료")
+""")
 
-    시작 SFT와 검증으로 선택한 모델을 같은 지도와 환경 난수에서 실행합니다.
-    `selection.json`에 선택된 단계와 업데이트 수가 기록됩니다.
-    지도와 seed를 고르고 ‘지도 초기화’를 누른 뒤 한 걸음씩 또는 자동으로 실행하세요.
-''')
-code('''
+markdown("""
+    ### 3단계 나란히 실행
+
+    시작 SFT와 선택 모델의 경로·총비용을 같은 지도에서 비교하세요.
+""")
+
+code("""
     selected = json.loads(SELECTION_PATH.read_text(encoding="utf-8"))
-    print("선택 모델:", selected["source"], "업데이트:", selected["step"])
-    comparison_demo = launch_navigation({
-        "시작 SFT": str(GRPO_DIR / "initial_sft.pt"),
-        "검증 선택": str(SELECTED_PATH),
-    }, CONFIG_PATH)
-''')
-markdown('''
+    print("선택 모델:", selected["source"], "PPO 업데이트:", selected["step"])
+    comparison_demo = launch_navigation({"시작 SFT": str(PPO_DIR / "initial_sft.pt"), "검증 선택": str(SELECTED_PATH)}, CONFIG_PATH)
+""")
+
+markdown("""
     ## 4. 최종 테스트
 
-    GRPO 구간별 비교와 모델 선택을 마친 뒤 실행하세요. 검증과 다른 지도 seed를 사용합니다.
-    시작 SFT, 마지막 GRPO, 검증 선택 모델을 BFS·optimal과 비교합니다.
-    BFS는 현재 위치에서 다시 계획하고 optimal은 미끄러짐·보상·남은 행동 수를 고려합니다.
-''')
-code('''
+    모델 선택을 마친 뒤 다른 지도에서 평가합니다.
+    도착률·평균 보상과 성공 시 비용·최소 비용 대비 초과 비용을 비교하세요.
+""")
+
+code("""
     final_test = report_navigation({
-        "시작 SFT": str(GRPO_DIR / "initial_sft.pt"),
-        "마지막 GRPO": str(GRPO_DIR / "grpo.pt"),
+        "시작 SFT": str(PPO_DIR / "initial_sft.pt"),
+        "마지막 PPO": str(PPO_DIR / "ppo.pt"),
         "검증 선택": str(SELECTED_PATH),
     }, CONFIG_PATH, split="test")
-''')
-markdown("""
-    ## 5. 선택적 단계 생략 비교
-
-    비교할 실험의 스위치를 `True`로 바꾸고 해당 셀을 실행하세요.
-    사전학습 생략은 무작위 초기화 → SFT → GRPO,
-    SFT 생략은 사전학습 → GRPO 순서입니다.
-    생략 실험은 별도 하위 폴더에 저장합니다. 사전학습 생략의 SFT는 위에서 지정한 총 업데이트 수를 사용합니다. 각 실험의 업데이트 수와 검증 지표를 비교하세요.
 """)
-code('''
+
+markdown("""
+    ## 5. 선택: 단계 생략 비교
+
+    스위치를 켠 실험만 실행합니다. 사전학습 생략은 무작위 초기화 → SFT → PPO,
+    SFT 생략은 사전학습 → PPO입니다. 후속 단계 업데이트 수를 맞춰 비교합니다.
+""")
+
+code("""
     RUN_WITHOUT_PRETRAIN = False
     if RUN_WITHOUT_PRETRAIN:
         ablation_dir = OUTPUT_DIR / "without_pretrain"
@@ -314,30 +304,41 @@ code('''
         random_path = ablation_dir / "random_initialization.pt"
         save_checkpoint(random_path, random_model, config, "random_initialization", 0)
         del random_model
-        run_stage("sft", CONFIG_PATH, ablation_dir, steps=SFT_TOTAL_STEPS, initialize_from=random_path)
-        run_stage("grpo", CONFIG_PATH, ablation_dir)
-        report_navigation({"선택 모델": str(SELECTED_PATH), "사전학습 생략": str(ablation_dir / "grpo.pt")}, CONFIG_PATH)
-''')
-code('''
+        sft_payload = torch.load(PPO_DIR / "initial_sft.pt", map_location="cpu", weights_only=True)
+        sft_steps = sft_payload["step"]
+        del sft_payload
+        run_stage("sft", CONFIG_PATH, ablation_dir, steps=sft_steps, initialize_from=random_path)
+        ppo_payload = torch.load(PPO_DIR / "ppo.pt", map_location="cpu", weights_only=True)
+        ppo_steps = ppo_payload["step"]
+        del ppo_payload
+        run_stage("ppo", CONFIG_PATH, ablation_dir, steps=ppo_steps)
+        report_navigation({"전체 흐름": str(PPO_DIR / "ppo.pt"), "사전학습 생략": str(ablation_dir / "ppo.pt")}, CONFIG_PATH)
+""")
+
+code("""
     RUN_WITHOUT_SFT = False
     if RUN_WITHOUT_SFT:
         ablation_dir = OUTPUT_DIR / "without_sft"
-        run_stage("grpo", CONFIG_PATH, ablation_dir, initialize_from=OUTPUT_DIR / "pretrain.pt")
-        report_navigation({"선택 모델": str(SELECTED_PATH), "SFT 생략": str(ablation_dir / "grpo.pt")}, CONFIG_PATH)
-''')
-markdown("""
-    ## 6. 체크포인트 다운로드
-
-    `DOWNLOAD_RESULTS = True`로 바꾸고 실행해 모델·설정·학습 로그·평가 결과를 ZIP으로 내려받으세요.
-    다음 런타임에서 ZIP을 출력 폴더에 복원한 뒤 평가 셀을 실행하면 저장된 모델을 다시 사용할 수 있습니다.
+        ppo_payload = torch.load(PPO_DIR / "ppo.pt", map_location="cpu", weights_only=True)
+        ppo_steps = ppo_payload["step"]
+        del ppo_payload
+        run_stage("ppo", CONFIG_PATH, ablation_dir, steps=ppo_steps, initialize_from=OUTPUT_DIR / "pretrain.pt")
+        report_navigation({"전체 흐름": str(PPO_DIR / "ppo.pt"), "SFT 생략": str(ablation_dir / "ppo.pt")}, CONFIG_PATH)
 """)
-code('''
+
+markdown("""
+    ## 6. 다운로드
+
+    `DOWNLOAD_RESULTS = True`로 설정해 모델·설정·학습 및 평가 기록을 ZIP으로 저장합니다.
+""")
+
+code("""
     DOWNLOAD_RESULTS = False
     if DOWNLOAD_RESULTS:
         from google.colab import files
-        archive_path = shutil.make_archive(str(OUTPUT_DIR.parent / f"maze_results_{PROFILE}"), "zip", OUTPUT_DIR)
+        archive_path = shutil.make_archive(str(OUTPUT_DIR.parent / f"weighted_maze_results_{PROFILE}"), "zip", OUTPUT_DIR)
         files.download(archive_path)
-''')
+""")
 
 notebook = {
     "cells": cells,

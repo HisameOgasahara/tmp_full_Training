@@ -1,4 +1,4 @@
-"""A small causal decoder sharing its backbone across both prediction tasks."""
+"""A causal decoder with token, transition-cost, and state-value outputs."""
 
 import math
 import torch
@@ -36,7 +36,11 @@ class MazeTransformer(nn.Module):
         self.blocks = nn.ModuleList([CausalBlock(width, config["heads"], config["ff_multiplier"]) for _ in range(config["layers"])])
         self.norm_final = nn.LayerNorm(width)
         self.output_bias = nn.Parameter(torch.zeros(vocabulary_size))
+        self.predict_cost = nn.Linear(width, 1)
+        self.predict_value = nn.Linear(width, 1)
         self.apply(self._initialize)
+        nn.init.zeros_(self.predict_value.weight)
+        nn.init.zeros_(self.predict_value.bias)
 
     @staticmethod
     def _initialize(module):
@@ -45,10 +49,14 @@ class MazeTransformer(nn.Module):
             if isinstance(module, nn.Linear) and module.bias is not None:
                 nn.init.zeros_(module.bias)
 
-    def forward(self, tokens):
+    def forward(self, tokens, with_auxiliary=False):
         positions = torch.arange(tokens.shape[1], device=tokens.device)
         x = self.embed_tokens(tokens) * math.sqrt(self.embed_tokens.embedding_dim) + self.embed_positions(positions)
         for block in self.blocks:
             x = block(x)
         # Only the query token needs a prediction. Avoid allocating B*T*V logits.
-        return F.linear(self.norm_final(x[:, -1]), self.embed_tokens.weight, self.output_bias)
+        features = self.norm_final(x[:, -1])
+        logits = F.linear(features, self.embed_tokens.weight, self.output_bias)
+        if with_auxiliary:
+            return logits, self.predict_cost(features).squeeze(-1), self.predict_value(features).squeeze(-1)
+        return logits

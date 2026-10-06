@@ -7,7 +7,7 @@ from .environment import WALL
 class MazeEncoder:
     def __init__(self, max_size):
         self.max_size = max_size
-        self.position_offset = 5
+        self.position_offset = 4
         self.position_count = max_size ** 2
         self.action_offset = self.position_offset + self.position_count
         self.size_offset = self.action_offset + 4

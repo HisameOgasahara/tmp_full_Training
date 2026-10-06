@@ -1,24 +1,67 @@
 {
   "seed": 42,
   "environment": {
-    "sizes": [5], "max_size": 5,
-    "wall_probability": 0.12, "hole_probability": 0.10,
-    "ice_probability": 0.35, "slip_probability": 0.30,
-    "max_steps": 12,
-    "goal_reward": 1.0, "hole_reward": -1.0,
-    "step_reward": -0.01, "collision_reward": -0.02
+    "sizes": [
+      5
+    ],
+    "max_size": 5,
+    "wall_probability": 0.28,
+    "mud_probability": 0.3,
+    "floor_cost": 1.0,
+    "mud_cost": 4.0,
+    "collision_cost": 2.0,
+    "cost_scale": 0.1,
+    "goal_reward": 5.0,
+    "max_steps": 32,
+    "minimum_cost_gap": 2.0,
+    "generation_attempts": 10000
   },
-  "model": {"layers": 2, "width": 32, "heads": 4, "ff_multiplier": 2},
-  "data": {"train_maps": 12, "validation_maps": 2, "test_maps": 2},
-  "pretrain": {"steps": 4, "batch_size": 8, "learning_rate": 0.0003},
-  "sft": {"steps": 4, "batch_size": 8, "learning_rate": 0.0002},
-  "grpo": {
-    "steps": 2, "prompts": 2, "group_size": 4,
-    "learning_rate": 0.00003, "epochs": 2, "microbatch": 16,
-    "clip_epsilon": 0.2, "kl_coefficient": 0.02,
-    "temperature": 1.0, "advantage_epsilon": 0.000001
+  "model": {
+    "layers": 2,
+    "width": 32,
+    "heads": 4,
+    "ff_multiplier": 2
   },
-  "training": {"log_every": 1, "checkpoint_every": 2, "gradient_clip": 1.0, "weight_decay": 0.01},
-  "evaluation": {"trials_per_map": 2, "world_samples": 16, "batch_size": 16},
-  "display": {"animation_delay": 0.1}
+  "data": {
+    "train_maps": 12,
+    "validation_maps": 2,
+    "test_maps": 2
+  },
+  "pretrain": {
+    "steps": 4,
+    "batch_size": 8,
+    "learning_rate": 0.0003,
+    "cost_loss_coefficient": 1.0
+  },
+  "sft": {
+    "steps": 4,
+    "batch_size": 8,
+    "learning_rate": 0.0002
+  },
+  "training": {
+    "log_every": 1,
+    "checkpoint_every": 2,
+    "gradient_clip": 1.0,
+    "weight_decay": 0.01
+  },
+  "evaluation": {
+    "world_samples": 16,
+    "batch_size": 16
+  },
+  "display": {
+    "animation_delay": 0.1
+  },
+  "ppo": {
+    "steps": 2,
+    "num_envs": 2,
+    "learning_rate": 1e-05,
+    "epochs": 2,
+    "minibatch": 16,
+    "clip_epsilon": 0.2,
+    "value_coefficient": 0.5,
+    "entropy_coefficient": 0.01,
+    "gamma": 1.0,
+    "gae_lambda": 0.95,
+    "target_kl": 0.02
+  }
 }

@@ -1,1 +1,1 @@
-"""Three-stage training on small, fully observable stochastic grid worlds."""
+"""Three-stage Transformer training on deterministic weighted mazes."""

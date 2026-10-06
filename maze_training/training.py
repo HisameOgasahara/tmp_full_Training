@@ -1,7 +1,6 @@
-"""Train each stage independently, including environment-interactive GRPO."""
+"""Train each stage independently, including actor-critic PPO with complete-episode GAE."""
 
 import argparse
-import copy
 import json
 import time
 from pathlib import Path
@@ -10,22 +9,14 @@ import torch
 from torch.nn import functional as F
 from .data import build_maps, sample_world_batch, build_expert_examples
 from .environment import step_environment
-from .evaluation import predict_action_probabilities
 from .runtime import read_config, seed_runtime, choose_device, mixed_precision, create_model, load_model, save_checkpoint, write_json
 
-PREDECESSOR = {"sft": "pretrain", "grpo": "sft"}
-
-
-def normalize_group_rewards(rewards, epsilon):
-    mean = rewards.mean(dim=1, keepdim=True)
-    std = rewards.std(dim=1, keepdim=True, correction=0)
-    advantages = (rewards - mean) / std.clamp_min(epsilon)
-    return advantages, std.squeeze(1) > epsilon
+PREDECESSOR = {"sft": "pretrain", "ppo": "sft"}
 
 
 def optimize_loss(loss, model, optimizer, scaler, gradient_clip):
     if not torch.isfinite(loss):
-        raise FloatingPointError("학습 손실이 유한하지 않습니다. 학습률과 보상 설정을 확인하세요.")
+        raise FloatingPointError("학습 손실이 유한하지 않습니다. 학습률을 확인하세요.")
     optimizer.zero_grad(set_to_none=True)
     scaler.scale(loss).backward()
     scaler.unscale_(optimizer)
@@ -35,109 +26,108 @@ def optimize_loss(loss, model, optimizer, scaler, gradient_clip):
     return float(gradient_norm)
 
 
+def compute_gae(rewards, values, gamma, gae_lambda):
+    """Complete episodes: the goal and finite-horizon timeout both have zero continuation."""
+    advantages = torch.zeros_like(rewards)
+    running = rewards.new_zeros(())
+    next_value = rewards.new_zeros(())
+    for index in range(len(rewards) - 1, -1, -1):
+        delta = rewards[index] + gamma * next_value - values[index]
+        running = delta + gamma * gae_lambda * running
+        advantages[index] = running
+        next_value = values[index]
+    return advantages, advantages + values
+
+
 @torch.no_grad()
 def collect_rollouts(model, encoder, maps, config, rng):
-    settings, rules = config["grpo"], config["environment"]
-    group_size, prompts = settings["group_size"], settings["prompts"]
-    selected = [maps[int(rng.integers(len(maps)))] for _ in range(prompts)]
-    mazes = [maze for maze in selected for _ in range(group_size)]
-    noise = rng.random((prompts, rules["max_steps"]))
-    positions = [maze.start for maze in mazes]
-    returns = np.zeros(len(mazes), dtype=np.float32)
-    successes = np.zeros(len(mazes), dtype=bool)
-    active = list(range(len(mazes)))
-    queries, actions, log_probabilities, episode_indices = [], [], [], []
+    settings, rules = config["ppo"], config["environment"]
+    selected = [maps[int(rng.integers(len(maps)))] for _ in range(settings["num_envs"])]
+    trajectories = [{"queries":[], "actions":[], "log_probs":[], "values":[], "rewards":[], "cost":0.0, "success":False} for _ in selected]
+    positions = [maze.start for maze in selected]
+    active = list(range(len(selected)))
+    device = next(model.parameters()).device
     model.eval()
-    for step in range(rules["max_steps"]):
+    for _ in range(rules["max_steps"]):
         if not active:
             break
-        probabilities = predict_action_probabilities(model, encoder, [mazes[i] for i in active], [positions[i] for i in active], settings["temperature"])
-        sampled = torch.multinomial(probabilities, 1).squeeze(-1)
-        old_log_probs = probabilities.gather(-1, sampled[:, None]).clamp_min(1e-10).log().squeeze(-1)
-        next_active = []
+        inputs = [encoder.encode_query(selected[i], positions[i]) for i in active]
+        with mixed_precision(device):
+            logits, _, values = model(torch.tensor(inputs, device=device), with_auxiliary=True)
+        distribution = torch.distributions.Categorical(logits=logits[:, encoder.action_slice].float())
+        actions = distribution.sample()
+        log_probs = distribution.log_prob(actions)
+        remaining = []
         for offset, index in enumerate(active):
-            action = int(sampled[offset])
-            queries.append(encoder.encode_query(mazes[index], positions[index]))
-            actions.append(action)
-            log_probabilities.append(float(old_log_probs[offset]))
-            episode_indices.append(index)
-            # Common random numbers within a group reduce outcome noise in reward comparisons.
-            outcome = step_environment(mazes[index], positions[index], action, rules, noise[index // group_size, step])
+            action = int(actions[offset])
+            outcome = step_environment(selected[index], positions[index], action, rules)
+            episode = trajectories[index]
+            episode["queries"].append(inputs[offset])
+            episode["actions"].append(action)
+            episode["log_probs"].append(float(log_probs[offset]))
+            episode["values"].append(float(values[offset]))
+            episode["rewards"].append(outcome.reward)
+            episode["cost"] += outcome.cost
+            episode["success"] = outcome.success
             positions[index] = outcome.position
-            returns[index] += outcome.reward
-            successes[index] = outcome.success
             if not outcome.done:
-                next_active.append(index)
-        active = next_active
-    return {
-        "queries": np.asarray(queries), "actions": np.asarray(actions),
-        "old_log_probabilities": np.asarray(log_probabilities, dtype=np.float32),
-        "episode_indices": np.asarray(episode_indices),
-        "returns": returns.reshape(prompts, group_size), "successes": successes,
-    }
+                remaining.append(index)
+        active = remaining
+    combined = {key:[] for key in ("queries", "actions", "log_probs", "values", "advantages", "returns")}
+    for episode in trajectories:
+        rewards = torch.tensor(episode["rewards"], device=device)
+        values = torch.tensor(episode["values"], device=device)
+        advantages, returns = compute_gae(rewards, values, settings["gamma"], settings["gae_lambda"])
+        for key in ("queries", "actions", "log_probs", "values"):
+            combined[key].extend(episode[key])
+        combined["advantages"].extend(advantages.cpu().tolist())
+        combined["returns"].extend(returns.cpu().tolist())
+    tensors = {key:torch.as_tensor(value, device=device, dtype=torch.long if key in ("queries", "actions") else torch.float32) for key, value in combined.items()}
+    metrics = {"mean_return":float(np.mean([sum(e["rewards"]) for e in trajectories])), "sampled_success_rate":float(np.mean([e["success"] for e in trajectories])), "mean_cost":float(np.mean([e["cost"] for e in trajectories])), "transitions":len(tensors["actions"])}
+    return tensors, metrics
 
 
-def train_grpo_step(model, reference, encoder, maps, config, rng, optimizer, scaler):
-    device, settings = next(model.parameters()).device, config["grpo"]
-    rollout = collect_rollouts(model, encoder, maps, config, rng)
-    returns = torch.as_tensor(rollout["returns"], device=device)
-    advantages, useful = normalize_group_rewards(returns, settings["advantage_epsilon"])
-    episode_ids = torch.as_tensor(rollout["episode_indices"], device=device)
-    useful_steps = useful[episode_ids // settings["group_size"]]
-    indices = torch.where(useful_steps)[0]
-    metrics = {
-        "mean_return": float(returns.mean()), "sampled_success_rate": float(rollout["successes"].mean()),
-        "useful_group_fraction": float(useful.float().mean()), "transitions": len(episode_ids),
-        "loss": 0.0, "kl": 0.0, "clip_fraction": 0.0,
-    }
-    if not len(indices):
-        return metrics
-    queries = torch.as_tensor(rollout["queries"], device=device)
-    actions = torch.as_tensor(rollout["actions"], device=device)
-    old_log_probabilities = torch.as_tensor(rollout["old_log_probabilities"], device=device)
-    per_step_advantage = advantages.flatten()[episode_ids]
-    lengths = torch.bincount(episode_ids, minlength=returns.numel()).float()
-    # Each trajectory contributes its average token loss, rather than weighting long failures more.
-    weights = lengths[episode_ids].reciprocal()
+def train_ppo_step(model, encoder, maps, config, rng, optimizer, scaler):
+    settings = config["ppo"]
+    rollout, metrics = collect_rollouts(model, encoder, maps, config, rng)
+    advantages = rollout["advantages"]
+    advantages = (advantages - advantages.mean()) / advantages.std(correction=0).clamp_min(1e-8)
     model.train()
+    device = next(model.parameters()).device
     totals = []
+    stopped = False
     for _ in range(settings["epochs"]):
-        permutation = indices[torch.randperm(len(indices), device=device)]
-        optimizer.zero_grad(set_to_none=True)
-        weighted_loss, weighted_kl, clipped_count = 0.0, 0.0, 0.0
-        for start in range(0, len(permutation), settings["microbatch"]):
-            batch = permutation[start:start + settings["microbatch"]]
+        indices = torch.randperm(len(advantages), device=device)
+        for start in range(0, len(indices), settings["minibatch"]):
+            batch = indices[start:start + settings["minibatch"]]
             with mixed_precision(device):
-                logits = model(queries[batch])[:, encoder.action_slice].float() / settings["temperature"]
-            log_probs = logits.log_softmax(-1)
-            selected = log_probs.gather(-1, actions[batch, None]).squeeze(-1)
-            with torch.no_grad(), mixed_precision(device):
-                reference_log_probs = (reference(queries[batch])[:, encoder.action_slice].float() / settings["temperature"]).log_softmax(-1)
-            # Exact categorical KL over four actions, not a noisy single-action estimator.
-            kl = (log_probs.exp() * (log_probs - reference_log_probs)).sum(-1)
-            ratio = (selected - old_log_probabilities[batch]).exp()
-            advantage = per_step_advantage[batch]
+                logits, _, values = model(rollout["queries"][batch], with_auxiliary=True)
+            distribution = torch.distributions.Categorical(logits=logits[:, encoder.action_slice].float())
+            log_probs = distribution.log_prob(rollout["actions"][batch])
+            log_ratio = log_probs - rollout["log_probs"][batch]
+            ratio = log_ratio.exp()
+            approx_kl = ((ratio - 1) - log_ratio).mean()
+            if float(approx_kl.detach()) > settings["target_kl"]:
+                stopped = True
+                break
             clipped = ratio.clamp(1 - settings["clip_epsilon"], 1 + settings["clip_epsilon"])
-            surrogate = -torch.minimum(ratio * advantage, clipped * advantage)
-            loss = ((surrogate + settings["kl_coefficient"] * kl) * weights[batch]).sum() / (useful.sum() * settings["group_size"])
-            if not torch.isfinite(loss):
-                raise FloatingPointError("GRPO 손실이 유한하지 않습니다.")
-            scaler.scale(loss).backward()
-            weighted_loss += float(loss.detach())
-            weighted_kl += float((kl.detach() * weights[batch]).sum()) / int(useful.sum() * settings["group_size"])
-            clipped_count += float((ratio.detach() != clipped.detach()).sum())
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), config["training"]["gradient_clip"])
-        scaler.step(optimizer)
-        scaler.update()
-        totals.append((weighted_loss, weighted_kl, clipped_count / len(indices)))
-    metrics.update(dict(zip(("loss", "kl", "clip_fraction"), np.mean(totals, axis=0).tolist())))
+            policy_loss = -torch.minimum(ratio * advantages[batch], clipped * advantages[batch]).mean()
+            value_loss = F.mse_loss(values.float(), rollout["returns"][batch])
+            entropy = distribution.entropy().mean()
+            loss = policy_loss + settings["value_coefficient"] * value_loss - settings["entropy_coefficient"] * entropy
+            optimize_loss(loss, model, optimizer, scaler, config["training"]["gradient_clip"])
+            totals.append((float(loss.detach()), float(value_loss.detach()), float(entropy.detach()), float(approx_kl.detach()), float(((ratio - 1).abs() > settings["clip_epsilon"]).float().mean())))
+        if stopped:
+            break
+    averages = np.mean(totals, axis=0).tolist() if totals else [0.0] * 5
+    metrics.update(dict(zip(("loss", "value_loss", "entropy", "approx_kl", "clip_fraction"), averages)))
+    metrics["early_stop"] = stopped
     return metrics
 
 
-def run_stage(stage, config_path="configs/t4.json", output_dir="runs/t4", steps=None, initialize_from=None, resume=False):
-    if stage not in ("pretrain", "sft", "grpo"):
-        raise ValueError("stage는 pretrain, sft, grpo 중 하나입니다.")
+def run_stage(stage, config_path="configs/t4.json", output_dir="runs/weighted_maze/t4", steps=None, initialize_from=None, resume=False):
+    if stage not in ("pretrain", "sft", "ppo"):
+        raise ValueError("stage는 pretrain, sft, ppo 중 하나입니다.")
     config = read_config(config_path)
     seed_runtime(config["seed"])
     device = choose_device()
@@ -158,13 +148,13 @@ def run_stage(stage, config_path="configs/t4.json", output_dir="runs/t4", steps=
             raise FileNotFoundError(f"이전 단계 모델이 없습니다: {source}. 이전 학습 셀을 먼저 실행하세요.")
         model, encoder, source_payload = load_model(source, device)
         if source_payload["config"] != config:
-            raise ValueError("단계 간에는 같은 설정을 사용하세요. smoke와 t4 체크포인트는 호환되지 않습니다.")
+            raise ValueError("단계 간에는 같은 설정을 사용하세요.")
     else:
         model, encoder = create_model(config, device)
     settings = config[stage]
     optimizer = torch.optim.AdamW(model.parameters(), lr=settings["learning_rate"], weight_decay=config["training"]["weight_decay"])
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
-    rng = np.random.default_rng(config["seed"] + {"pretrain": 10, "sft": 20, "grpo": 30}[stage])
+    rng = np.random.default_rng(config["seed"] + {"pretrain": 10, "sft": 20, "ppo": 30}[stage])
     if payload is not None:
         optimizer.load_state_dict(payload["optimizer"])
         scaler.load_state_dict(payload["scaler"])
@@ -173,12 +163,6 @@ def run_stage(stage, config_path="configs/t4.json", output_dir="runs/t4", steps=
         if device.type == "cuda" and payload.get("cuda_rng"):
             torch.cuda.set_rng_state_all(payload["cuda_rng"])
     maps = build_maps(config, "train")
-    reference = None
-    if stage == "grpo":
-        reference = copy.deepcopy(model).eval()
-        if payload is not None:
-            reference.load_state_dict(payload["reference"])
-        reference.requires_grad_(False)
     expert_inputs, expert_targets = build_expert_examples(maps, encoder) if stage == "sft" else (None, None)
     total_steps = settings["steps"] if steps is None else steps
     if total_steps <= start_step:
@@ -196,20 +180,18 @@ def run_stage(stage, config_path="configs/t4.json", output_dir="runs/t4", steps=
             "numpy_rng": rng.bit_generator.state, "torch_rng": torch.get_rng_state(),
             "cuda_rng": torch.cuda.get_rng_state_all() if device.type == "cuda" else [],
         }
-        if reference is not None:
-            extra["reference"] = {key: value.detach().cpu().clone() for key, value in reference.state_dict().items()}
         save_checkpoint(target, model, config, stage, step, **extra)
         write_json(output_dir / f"{stage}_history.json", history)
 
     completed = start_step
     try:
         for step in range(start_step + 1, total_steps + 1):
-            if stage == "grpo":
-                metrics = train_grpo_step(model, reference, encoder, maps, config, rng, optimizer, scaler)
+            if stage == "ppo":
+                metrics = train_ppo_step(model, encoder, maps, config, rng, optimizer, scaler)
             else:
                 model.train()
                 if stage == "pretrain":
-                    inputs, labels, _ = sample_world_batch(maps, encoder, config["environment"], settings["batch_size"], rng)
+                    inputs, labels, costs = sample_world_batch(maps, encoder, config["environment"], settings["batch_size"], rng)
                     output_slice = encoder.position_slice
                 else:
                     selected = rng.integers(len(expert_inputs), size=settings["batch_size"])
@@ -218,8 +200,15 @@ def run_stage(stage, config_path="configs/t4.json", output_dir="runs/t4", steps=
                 tokens = torch.as_tensor(inputs, device=device)
                 targets = torch.as_tensor(labels, device=device)
                 with mixed_precision(device):
-                    logits = model(tokens)[:, output_slice]
-                    loss = F.cross_entropy(logits.float(), targets)
+                    if stage == "pretrain":
+                        all_logits, predicted_cost, _ = model(tokens, with_auxiliary=True)
+                        logits = all_logits[:, output_slice]
+                        cost_targets = torch.as_tensor(costs, device=device)
+                        cost_loss = F.smooth_l1_loss(predicted_cost.float(), cost_targets)
+                        loss = F.cross_entropy(logits.float(), targets) + settings["cost_loss_coefficient"] * cost_loss
+                    else:
+                        logits = model(tokens)[:, output_slice]
+                        loss = F.cross_entropy(logits.float(), targets)
                 gradient_norm = optimize_loss(loss, model, optimizer, scaler, config["training"]["gradient_clip"])
                 metrics = {"loss": float(loss.detach()), "accuracy": float((logits.argmax(-1) == targets).float().mean()), "gradient_norm": gradient_norm}
             completed = step
@@ -230,7 +219,7 @@ def run_stage(stage, config_path="configs/t4.json", output_dir="runs/t4", steps=
                 persist(step)
         persist(completed)
     except KeyboardInterrupt:
-        # Do not label a partially applied GRPO update as a completed training step.
+        # Do not label a partially applied PPO update as a completed training step.
         if target.exists():
             print(f"중단했습니다. 마지막 완전한 체크포인트에서 resume=True로 재개하세요: {target}", flush=True)
         else:
@@ -243,9 +232,9 @@ def run_stage(stage, config_path="configs/t4.json", output_dir="runs/t4", steps=
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("stage", choices=("pretrain", "sft", "grpo"))
+    parser.add_argument("stage", choices=("pretrain", "sft", "ppo"))
     parser.add_argument("--config", default="configs/t4.json")
-    parser.add_argument("--output-dir", default="runs/t4")
+    parser.add_argument("--output-dir", default="runs/weighted_maze/t4")
     parser.add_argument("--steps", type=int)
     parser.add_argument("--initialize-from")
     parser.add_argument("--resume", action="store_true")

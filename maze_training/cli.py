@@ -11,9 +11,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("task", choices=("world", "navigation"))
     parser.add_argument("--config", default="configs/t4.json")
-    parser.add_argument("--output-dir", default="runs/t4")
+    parser.add_argument("--output-dir", default="runs/weighted_maze/t4")
     parser.add_argument("--split", choices=("validation", "test"), default="validation")
-    parser.add_argument("--dry", action="store_true")
     arguments = parser.parse_args()
     config = read_config(arguments.config)
     seed_runtime(config["seed"])
@@ -24,16 +23,16 @@ def main():
             raise ValueError("설정 파일과 체크포인트가 다릅니다.")
         report = evaluate_world(model, encoder, config, arguments.split)
     else:
-        policies = {"BFS": "bfs", "optimal": "optimal"}
-        for stage in ("sft", "grpo"):
+        policies = {"BFS": "bfs", "Dijkstra": "dijkstra"}
+        for stage in ("sft", "ppo"):
             checkpoint = directory / f"{stage}.pt"
             if checkpoint.exists():
                 model, encoder, payload = load_model(checkpoint)
                 if payload["config"] != config:
                     raise ValueError("설정 파일과 체크포인트가 다릅니다.")
                 policies[stage] = (model, encoder)
-        report = evaluate_navigation(config, policies, arguments.split, not arguments.dry)
-    write_json(directory / f"{arguments.task}_{arguments.split}{'_dry' if arguments.dry else ''}.json", report)
+        report = evaluate_navigation(config, policies, arguments.split)
+    write_json(directory / f"{arguments.task}_{arguments.split}.json", report)
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 
