@@ -12,7 +12,7 @@ Colab에서 **T4 GPU**를 선택해 실행하세요.
 
 [![진단 노트북을 Colab에서 열기](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/HisameOgasahara/tmp_full_Training/blob/experiment/loop-diagnosis/notebooks/Maze_Diagnosis.ipynb)
 
-진단에는 이전 학습에서 저장한 SFT·PPO 체크포인트(`.pt`)가 필요합니다. Drive에 저장했다면 진단 노트북에서 `USE_DRIVE = True`로 설정하고 체크포인트 경로를 맞추세요.
+진단에는 이전 학습에서 저장한 SFT·PPO 체크포인트(`.pt`)가 필요합니다. Colab에서는 기본으로 Drive를 연결합니다. 저장 폴더를 맞추고 **런타임 → 모두 실행**을 선택하면 학습·검증 지도 전체, PPO 구간별 변화, SFT 보정 상태를 비교하고 권장 모델과 다음 변경 우선순위를 담은 `report.md`를 생성합니다. 결과는 ZIP으로 다운로드하고 Drive에도 저장합니다.
 
 ## 단계별 목표
 

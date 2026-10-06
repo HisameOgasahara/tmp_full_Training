@@ -21,9 +21,8 @@ def code(source):
 markdown("""
     # 미로 반복 실패 진단: SFT와 PPO 비교
 
-    기존 체크포인트로 실패 지도의 행동 확률과 이동 기록을 확인합니다.
-    argmax와 샘플링을 비교하고, 같은 검증 지도에서 성공 유지·개선·퇴행을 집계합니다.
-    비용은 두 모델이 모두 성공한 지도에서도 따로 비교합니다.
+    **런타임 → 모두 실행**으로 학습·검증 지도, 저장된 PPO 구간, 반복 실패와 SFT 보정 상태를 한 번에 비교합니다.
+    마지막에 권장 모델, 반복 원인, 다음 변경 우선순위를 담은 `report.md`와 결과 ZIP을 제공합니다.
 
     체크포인트는 읽기만 하며 학습을 실행하지 않습니다. 결과는 매 실행 새 폴더에 저장합니다.
     샘플링으로 탈출해도 argmax 길찾기가 해결된 것은 아닙니다.
@@ -90,7 +89,8 @@ code("""
     from IPython.display import display, HTML
     from html import escape
     from maze_training.runtime import load_model, choose_device, seed_runtime
-    from maze_training.data import build_maps
+    from maze_training.data import build_maps, build_expert_examples
+    from scripts.summarize_diagnosis import summarize_results
     from maze_training.environment import (
         ACTION_NAMES, WALL, GOAL, generate_maze, compute_goal_distances,
         move_nominal, step_environment, find_min_cost_path, calculate_path_cost,
@@ -103,17 +103,16 @@ code("""
 markdown("""
     ## 2. 체크포인트와 실험 조건
 
-    Colab에서 기존 Drive 파일을 사용하려면 `USE_DRIVE=True`로 바꾸세요.
-    `CHECKPOINT_ROOT` 또는 두 체크포인트 경로를 실제 파일 위치에 맞추세요.
-    시작 SFT는 `initial_sft.pt`, 선택 모델은 `selected_policy.pt`가 기본입니다.
-    선택 모델이 SFT이면 PPO 비교가 아니므로 파일과 선택 기록을 먼저 확인하세요.
+    Colab에서는 기본으로 Drive를 연결합니다. 기존 학습 저장 폴더를 그대로 사용합니다.
+    시작 SFT와 마지막 PPO를 불러오고, 같은 폴더의 PPO 구간 파일도 자동 비교합니다.
+    선택 모델이 SFT여도 마지막 PPO와 비교를 진행합니다.
 
     실패 seed는 문서의 세 사례입니다. 샘플링은 지도·모델별 20회, 제한은 기존 설정의 64회입니다.
     검증 비교는 기존 검증 지도 전체를 사용합니다. 테스트 지도는 모델 선택에 사용하지 마세요.
 """)
 
 code("""
-    USE_DRIVE = False
+    USE_DRIVE = IN_COLAB
     PROFILE = "t4"
     if USE_DRIVE:
         from google.colab import drive
@@ -126,7 +125,7 @@ code("""
         CHECKPOINT_ROOT = REPO_ROOT / "runs" / "weighted_maze_v2" / PROFILE
     CHECKPOINTS = {
         "SFT": CHECKPOINT_ROOT / "ppo_refinement" / "initial_sft.pt",
-        "PPO": CHECKPOINT_ROOT / "ppo_refinement" / "selected_policy.pt",
+        "PPO": CHECKPOINT_ROOT / "ppo_refinement" / "ppo.pt",
     }
     FAILURE_SEEDS = [3000042, 765563455, 657777688777]
     SAMPLING_REPEATS = 20
@@ -150,18 +149,33 @@ code("""
                 digest.update(block)
         return digest.hexdigest()
 
+    if not CHECKPOINTS["SFT"].exists() and (CHECKPOINT_ROOT / "sft.pt").exists():
+        CHECKPOINTS["SFT"] = CHECKPOINT_ROOT / "sft.pt"
+    for path in CHECKPOINTS.values():
+        if not path.exists():
+            raise FileNotFoundError(f"필수 학습 파일이 없습니다: {path}. CHECKPOINT_ROOT를 실제 저장 폴더로 지정하세요.")
+    for path in sorted(CHECKPOINTS["PPO"].parent.glob("ppo_[0-9][0-9][0-9][0-9].pt")):
+        CHECKPOINTS[f"PPO@{int(path.stem.split('_')[1])}"] = path
     models, checkpoint_metadata = {}, {}
+    sft_sampling_weights = None
+    checkpoint_hashes = set()
     for name, path in CHECKPOINTS.items():
+        digest = hash_file(path)
+        if digest in checkpoint_hashes:
+            continue
         model, encoder, payload = load_model(path)
-        if payload["stage"] != name.lower():
+        if payload["stage"] != name.split("@")[0].lower():
             raise ValueError(f"{name} 경로의 단계는 {payload['stage']}입니다. 비교할 체크포인트를 확인하세요.")
+        if name == "SFT" and "sampling_weights" in payload:
+            sft_sampling_weights = payload["sampling_weights"].cpu().numpy()
+        checkpoint_hashes.add(digest)
         models[name] = (model, encoder)
         checkpoint_metadata[name] = {
-            "path": str(path.resolve()), "sha256": hash_file(path),
+            "path": str(path.resolve()), "sha256": digest,
             "stage": payload["stage"], "step": payload["step"], "config": payload["config"],
         }
     config = checkpoint_metadata["SFT"]["config"]
-    if config != checkpoint_metadata["PPO"]["config"]:
+    if any(config != item["config"] for item in checkpoint_metadata.values()):
         raise ValueError("두 체크포인트의 설정이 다릅니다. 같은 실험의 파일을 선택하세요.")
     rules = config["environment"]
     selection_path = CHECKPOINTS["PPO"].parent / "selection.json"
@@ -186,6 +200,19 @@ markdown("""
 
 code("""
     probability_cache = {}
+
+    def cache_map_probabilities(mazes):
+        batch_size = config["evaluation"]["batch_size"]
+        for name, (model, encoder) in models.items():
+            pending = [(maze, position) for maze in mazes for position in compute_goal_distances(maze)
+                       if position != maze.goal and (name, maze.seed, position) not in probability_cache]
+            for start in range(0, len(pending), batch_size):
+                batch = pending[start:start + batch_size]
+                probabilities = predict_action_probabilities(model, encoder, [item[0] for item in batch],
+                                                              [item[1] for item in batch]).cpu().numpy()
+                for (maze, position), probabilities_at_state in zip(batch, probabilities):
+                    probability_cache[name, maze.seed, position] = probabilities_at_state.astype(float)
+            print("행동 확률 준비 완료:", name, "지도", len(mazes), "개", flush=True)
 
     def get_probabilities(name, maze, position):
         key = (name, maze.seed, position)
@@ -235,6 +262,7 @@ code("""
                 "cost": total_cost, "return": total_return, "trace": trace}
 
     failure_maps = [generate_maze(seed, rules) for seed in FAILURE_SEEDS]
+    cache_map_probabilities(failure_maps)
     failure_records = []
     for maze in failure_maps:
         print("지도 seed:", maze.seed, "시작:", maze.start, "목표:", maze.goal)
@@ -289,6 +317,7 @@ markdown("""
 
 code("""
     validation_maps = build_maps(config, SPLIT)
+    cache_map_probabilities(validation_maps)
     validation_records, paired_rows = [], []
     labels = {(True, True): "성공 유지", (False, True): "개선", (True, False): "퇴행", (False, False): "실패 유지"}
     for index, maze in enumerate(validation_maps):
@@ -307,7 +336,7 @@ code("""
     transition_counts = {label: sum(row["변화"] == label for row in paired_rows) for label in labels.values()}
     show_table([{"변화": label, "지도 수": count} for label, count in transition_counts.items()])
     summary_rows = []
-    for name in models:
+    for name in ("SFT", "PPO"):
         records = [row for row in validation_records if row["model"] == name]
         summary_rows.append({"모델": name, "지도 수": len(records),
                              "도착률": float(np.mean([row["success"] for row in records])),
@@ -316,7 +345,7 @@ code("""
     show_table(summary_rows)
     common = [row for row in paired_rows if row["변화"] == "성공 유지"]
     common_costs = {"지도 수": len(common)}
-    for name in models:
+    for name in ("SFT", "PPO"):
         common_costs[f"{name} 비용"] = float(np.mean([row[f"{name} 비용"] for row in common])) if common else None
         common_costs[f"{name} 초과 비용"] = float(np.mean([row[f"{name} 비용"] - row["최소 비용"] for row in common])) if common else None
     common_costs["비용 차이 PPO−SFT"] = float(np.mean([row["비용 차이 PPO−SFT"] for row in common])) if common else None
@@ -324,16 +353,107 @@ code("""
 """)
 
 markdown("""
-    ## 6. 결과 저장과 다음 판단
+    ## 6. 학습·검증 전체 비교와 보정 상태 자동 진단
+
+    학습 지도 전체와 검증 지도 전체를 같은 argmax 방식으로 평가합니다.
+    저장된 PPO 구간마다 SFT 대비 개선·퇴행·공통 성공 비용을 비교합니다.
+    검증에서 실패한 지도도 자동으로 20회 샘플링해 실행 방식 차이를 확인합니다.
+
+    SFT 학습 지도에서 방문한 오답 위치를 모아 체크포인트에 저장된 보정 가중치와 대조합니다.
+    저장 가중치는 마지막 갱신 시점의 상태이며 과거에 학습된 횟수를 뜻하지 않습니다.
+    전체 지도 확률을 배치로 계산하며 진행 상황을 출력합니다.
+""")
+
+code("""
+    print("학습 지도 전체 생성 중:", config["data"]["train_maps"], "개", flush=True)
+    train_maps = build_maps(config, "train")
+    cache_map_probabilities(train_maps)
+    train_records = []
+    for name in models:
+        train_records.extend(run_episode(name, maze) for maze in train_maps)
+        print("학습 지도 평가 완료:", name, len(train_maps), "개", flush=True)
+    all_validation_records = list(validation_records)
+    for name in models:
+        if name not in ("SFT", "PPO"):
+            all_validation_records.extend(run_episode(name, maze) for maze in validation_maps)
+
+    def summarize_episodes(name, records):
+        subset = [row for row in records if row["model"] == name]
+        return {"model": name, "maps": len(subset),
+                "success_rate": float(np.mean([row["success"] for row in subset])),
+                "loop_rate": float(np.mean([row["loop"] for row in subset])),
+                "mean_return": float(np.mean([row["return"] for row in subset]))}
+
+    train_validation = [{"model": name, "train": summarize_episodes(name, train_records),
+                         "validation": summarize_episodes(name, all_validation_records)} for name in models]
+    baseline = {row["maze_seed"]: row for row in all_validation_records if row["model"] == "SFT"}
+    candidate_comparisons = []
+    for name in models:
+        candidate = {row["maze_seed"]: row for row in all_validation_records if row["model"] == name}
+        pairs = [(baseline[seed], candidate[seed]) for seed in baseline]
+        common_pairs = [(a, b) for a, b in pairs if a["success"] and b["success"]]
+        candidate_comparisons.append({
+            **summarize_episodes(name, all_validation_records),
+            "improved_seeds": [a["maze_seed"] for a, b in pairs if not a["success"] and b["success"]],
+            "regressed_seeds": [a["maze_seed"] for a, b in pairs if a["success"] and not b["success"]],
+            "common_success_maps": len(common_pairs),
+            "common_cost_delta": float(np.mean([b["cost"] - a["cost"] for a, b in common_pairs])) if common_pairs else None,
+        })
+    validation_sampling = []
+    for name in models:
+        failed_seeds = {row["maze_seed"] for row in all_validation_records if row["model"] == name and not row["success"]}
+        for maze in validation_maps:
+            if maze.seed in failed_seeds:
+                validation_sampling.extend(run_episode(name, maze, "sampling", SAMPLING_SEED + repeat)
+                                           for repeat in range(SAMPLING_REPEATS))
+        print("검증 실패 지도 샘플링 완료:", name, flush=True)
+
+    encoder = models["SFT"][1]
+    expert_queries, _ = build_expert_examples(train_maps, encoder)
+    weight_lookup = None
+    if sft_sampling_weights is not None:
+        if len(sft_sampling_weights) != len(expert_queries):
+            raise ValueError("저장된 SFT 보정 가중치 수와 현재 학습 데이터 수가 다릅니다.")
+        weight_lookup = {tuple(query): float(weight) for query, weight in zip(expert_queries, sft_sampling_weights)}
+    train_map_lookup = {maze.seed: maze for maze in train_maps}
+    wrong_states = {}
+    for record in train_records:
+        if record["model"] != "SFT":
+            continue
+        maze = train_map_lookup[record["maze_seed"]]
+        for row in record["trace"]:
+            if row["action"] not in row["bfs_actions"]:
+                key = (maze.seed, tuple(row["position"]))
+                query = tuple(encoder.encode_query(maze, tuple(row["position"])))
+                wrong_states[key] = {"maze_seed": maze.seed, "position": row["position"],
+                                     "bfs_probability": row["bfs_probability"],
+                                     "saved_weight": weight_lookup[query] if weight_lookup is not None else None}
+    correction = {
+        "weights_available": weight_lookup is not None,
+        "wrong_visited_states": len(wrong_states),
+        "weighted_wrong_states": sum(row["saved_weight"] > 1 for row in wrong_states.values()) if weight_lookup is not None else None,
+        "saved_weighted_states": int(np.count_nonzero(sft_sampling_weights > 1)) if weight_lookup is not None else None,
+        "wrong_states": list(wrong_states.values()),
+        "refresh_maps": config["sft"]["correction_maps"], "train_maps": len(train_maps),
+        "snapshot_only": True,
+    }
+    show_table([{"모델": row["model"], "학습 도착률": row["train"]["success_rate"],
+                 "검증 도착률": row["validation"]["success_rate"],
+                 "학습 반복률": row["train"]["loop_rate"], "검증 반복률": row["validation"]["loop_rate"]}
+                for row in train_validation])
+    print("보정 가중치 집계:", {key: value for key, value in correction.items() if key != "wrong_states"})
+""")
+
+markdown("""
+    ## 7. 최종 보고서와 결과 저장
 
     `manifest.json`에는 실행 커밋, 체크포인트 SHA-256·단계·업데이트 수·설정, 난수 조건을 저장합니다.
     `trajectories.json`에는 모든 실행의 위치별 확률과 이동 기록을,
     `summary.json`에는 실행 방식 비교·지도별 변화·공통 성공 지도의 비용을 저장합니다.
 
-    - SFT부터 argmax 반복이 생기면 해당 위치의 BFS 정답 확률과 SFT 실패 위치 보정을 확인합니다.
-    - SFT 성공→PPO 실패 지도가 있으면 PPO에서 달라진 행동 확률을 확인합니다.
-    - 샘플링에서만 성공하면 argmax 반복과 낮은 정답 확률이 남아 있는지 확인합니다.
-    - 방문 이력이나 지도 표현 변경은 이 결과를 보고 결정합니다.
+    `report.md`에는 비교한 모델 중 권장 모델과 그 근거, 반복 지점의 확률,
+    SFT 보정 상태, 다음 변경 우선순위를 자동 작성합니다. 검증 결과에 따른 권장이며 최종 테스트 성능은 별개입니다.
+    Colab에서는 결과 ZIP을 자동으로 다운로드합니다. Drive에도 결과 폴더를 저장합니다.
 """)
 
 code("""
@@ -343,21 +463,38 @@ code("""
         "failure_seeds": FAILURE_SEEDS, "sampling_seed": SAMPLING_SEED,
         "sampling_repeats": SAMPLING_REPEATS, "split": SPLIT,
         "validation_seeds": [maze.seed for maze in validation_maps],
+        "train_seeds": [maze.seed for maze in train_maps],
         "device": str(choose_device()), "torch_version": str(torch.__version__),
         "numpy_version": np.__version__, "max_steps": rules["max_steps"],
     }
     artifacts = {
         "manifest.json": manifest,
         "trajectories.json": {"failure_argmax": failure_records, "failure_sampling": sampling_records,
-                              "validation_argmax": validation_records},
+                              "validation_argmax": all_validation_records, "train_argmax": train_records,
+                              "validation_failure_sampling": validation_sampling},
         "summary.json": {"mode_comparison": mode_rows, "validation": summary_rows,
                          "paired_maps": paired_rows, "transitions": transition_counts,
-                         "common_success_costs": common_costs},
+                         "common_success_costs": common_costs, "train_validation": train_validation,
+                         "candidate_comparisons": candidate_comparisons, "correction": correction},
     }
     for filename, value in artifacts.items():
         destination = RESULT_DIR / filename
         destination.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
         print("저장:", destination)
+    report = summarize_results(manifest, artifacts["summary.json"], artifacts["trajectories.json"])
+    (RESULT_DIR / "report.md").write_text(report, encoding="utf-8")
+    from IPython.display import Markdown
+    display(Markdown(report))
+    archive_path = shutil.make_archive(str(RESULT_DIR), "zip", RESULT_DIR)
+    if USE_DRIVE:
+        saved_dir = CHECKPOINT_ROOT / "diagnosis_results" / RESULT_DIR.name
+        shutil.copytree(RESULT_DIR, saved_dir)
+        shutil.copy2(archive_path, saved_dir.parent)
+        print("Drive 결과 저장:", saved_dir)
+    print("전체 결과 ZIP:", archive_path)
+    if IN_COLAB:
+        from google.colab import files
+        files.download(archive_path)
 """)
 
 notebook = {
