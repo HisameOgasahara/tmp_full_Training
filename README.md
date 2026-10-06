@@ -3,7 +3,7 @@
 작은 트랜스포머 하나로 **환경 규칙 사전학습 → BFS 행동 지도학습(SFT) → 실제 이동 결과로 GRPO**를 실행합니다. 각 단계는 독립된 셀이며, 다음 단계 전에 저장된 모델을 직접 실행할 수 있습니다.
 
 <!-- COLAB_BADGE_START -->
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/HisameOgasahara/tmp_full_Training/blob/main/notebooks/Maze_Training.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/HisameOgasahara/tmp_full_Training/blob/dac3306ab422acff86872693f63d46a734d3e4d3/notebooks/Maze_Training.ipynb)
 <!-- COLAB_BADGE_END -->
 
 ## 시작하기
