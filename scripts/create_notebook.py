@@ -174,39 +174,128 @@ code('''
     sft_report = report_navigation({"SFT": SFT_PATH}, CONFIG_PATH, slippery=True)
     sft_demo = launch_navigation({"SFT": SFT_PATH}, CONFIG_PATH)
 ''')
-markdown("""
-    ## 3. GRPO — 실제 성공과 위험을 고려
+markdown('''
+    ### 2단계 추가 학습 — 기본 길찾기 안정시키기
 
-    SFT 모델에서 시작해 지도별 후보 에피소드를 실행합니다.
-    도착·추락·이동·충돌 보상의 합을 그룹 안에서 비교해 행동을 학습합니다.
-    `useful_group_fraction`은 보상 차이가 있어 학습에 사용한 그룹의 비율입니다.
-""")
-code('''
-    GRPO_PATH = run_stage("grpo", CONFIG_PATH, OUTPUT_DIR, resume=RESUME)
-    show_training_curve(OUTPUT_DIR, "grpo")
+    위 평가에서 미끄러짐을 끈 도착률과 충돌 수를 확인하세요.
+    아래 셀은 기존 SFT를 총 4,000회까지 이어 학습하고 두 조건을 다시 평가합니다.
+    더 이어가려면 `SFT_TOTAL_STEPS`를 6,000처럼 늘리고 같은 셀을 실행하세요.
+    기존 모델이 있는 세션에서는 준비·설정 셀과 저장 위치를 맞춘 뒤 이 셀부터 실행할 수 있습니다.
 ''')
-markdown("""
+code('''
+    SFT_TOTAL_STEPS = 4000 if PROFILE == "t4" else 8
+    SFT_PATH = run_stage("sft", CONFIG_PATH, OUTPUT_DIR, steps=SFT_TOTAL_STEPS, resume=True)
+    show_training_curve(OUTPUT_DIR, "sft")
+    sft_dry_report = report_navigation({"SFT": SFT_PATH}, CONFIG_PATH, slippery=False)
+    sft_report = report_navigation({"SFT": SFT_PATH}, CONFIG_PATH, slippery=True)
+    sft_demo = launch_navigation({"SFT": SFT_PATH}, CONFIG_PATH)
+''')
+markdown('''
+    ## 3. GRPO — 개선된 SFT에서 짧게 학습하고 비교
+
+    아래 셀을 실행하면 현재 `sft.pt`에서 GRPO를 새로 시작하고 첫 50회 뒤 검증합니다.
+    새 실험은 `grpo_refinement` 폴더에 저장합니다. 이 시작 셀을 다시 실행하면 해당 실험을 다시 시작합니다.
+    이어 학습하려면 다음의 **50회 더 학습** 셀을 사용하세요.
+
+    검증 평균 보상이 높은 모델을 `selected_policy.pt`로 보관하고 동점이면 도착률로 선택합니다.
+    시작 SFT도 선택 후보에 포함합니다. 각 구간의 GRPO 모델과 검증 결과도 따로 저장합니다.
+    `useful_group_fraction`은 보상 차이가 있어 학습에 사용한 그룹의 비율입니다.
+''')
+code('''
+    import json
+    from maze_training.runtime import write_json
+
+    SFT_PATH = str(OUTPUT_DIR / "sft.pt")
+    GRPO_DIR = OUTPUT_DIR / "grpo_refinement"
+    GRPO_DIR.mkdir(parents=True, exist_ok=True)
+    GRPO_INTERVAL = 50 if PROFILE == "t4" else 1
+    GRPO_LIMIT = config["grpo"]["steps"]
+    SELECTION_PATH = GRPO_DIR / "selection.json"
+    SELECTED_PATH = GRPO_DIR / "selected_policy.pt"
+    baseline_report = report_navigation({"SFT": SFT_PATH}, CONFIG_PATH)
+    baseline_metrics = baseline_report["policies"]["SFT"]
+    shutil.copy2(SFT_PATH, GRPO_DIR / "initial_sft.pt")
+    shutil.copy2(SFT_PATH, SELECTED_PATH)
+    write_json(SELECTION_PATH, {
+        "source": "SFT", "step": 0,
+        "metrics": baseline_metrics,
+    })
+
+    def evaluate_and_save_grpo():
+        candidate_path = GRPO_DIR / "grpo.pt"
+        payload = torch.load(candidate_path, map_location="cpu", weights_only=True)
+        step = payload["step"]
+        del payload
+        report = report_navigation({
+            "시작 SFT": str(GRPO_DIR / "initial_sft.pt"),
+            "GRPO": str(candidate_path),
+        }, CONFIG_PATH)
+        metrics = report["policies"]["GRPO"]
+        shutil.copy2(candidate_path, GRPO_DIR / f"grpo_{step:04d}.pt")
+        write_json(GRPO_DIR / f"validation_{step:04d}.json", report)
+        selected = json.loads(SELECTION_PATH.read_text(encoding="utf-8"))
+        score = lambda values: (values["mean_return"], values["success_rate"])
+        if score(metrics) > score(selected["metrics"]):
+            shutil.copy2(candidate_path, SELECTED_PATH)
+            selected = {"source": "GRPO", "step": step, "metrics": metrics}
+            write_json(SELECTION_PATH, selected)
+        print(f"검증 선택: {selected['source']} {selected['step']}회 | "
+              f"평균 보상 {selected['metrics']['mean_return']:.3f} | "
+              f"도착률 {selected['metrics']['success_rate']:.1%}")
+        return report
+
+    GRPO_PATH = run_stage("grpo", CONFIG_PATH, GRPO_DIR,
+                          steps=min(GRPO_INTERVAL, GRPO_LIMIT), initialize_from=SFT_PATH)
+    comparison = evaluate_and_save_grpo()
+    show_training_curve(GRPO_DIR, "grpo")
+''')
+markdown('''
+    ### 50회 더 학습 — 이 셀을 반복 실행
+
+    현재 저장된 GRPO에서 50회를 더 학습하고 검증 선택 모델을 갱신합니다.
+    기본 총 250회까지 반복할 수 있습니다. `smoke`에서는 한 번에 1회씩 총 2회 실행합니다.
+    구간별 도착률·추락률·평균 보상과 선택된 모델을 확인하세요.
+''')
+code('''
+    payload = torch.load(GRPO_DIR / "grpo.pt", map_location="cpu", weights_only=True)
+    completed_steps = payload["step"]
+    del payload
+    next_steps = min(completed_steps + GRPO_INTERVAL, GRPO_LIMIT)
+    if next_steps > completed_steps:
+        GRPO_PATH = run_stage("grpo", CONFIG_PATH, GRPO_DIR, steps=next_steps, resume=True)
+        comparison = evaluate_and_save_grpo()
+        show_training_curve(GRPO_DIR, "grpo")
+    else:
+        print(f"GRPO {completed_steps}회 완료. 아래 실행 화면과 최종 테스트로 이동하세요.")
+''')
+markdown('''
     ### 3단계 평가와 나란히 실행
 
-    평가 셀을 실행해 SFT와 GRPO의 도착률·추락률·평균 보상을 비교하세요.
-    화면에서는 두 모델이 같은 지도와 환경 난수에서 argmax 행동으로 이동합니다.
-    지도와 seed를 선택하고 ‘지도 초기화’를 누른 뒤 한 걸음씩 또는 자동으로 실행하세요.
-""")
-code('''
-    SFT_PATH, GRPO_PATH = str(OUTPUT_DIR / "sft.pt"), str(OUTPUT_DIR / "grpo.pt")
-    comparison = report_navigation({"SFT": SFT_PATH, "GRPO": GRPO_PATH}, CONFIG_PATH)
-    comparison_demo = launch_navigation({"SFT": SFT_PATH, "GRPO": GRPO_PATH}, CONFIG_PATH)
+    시작 SFT와 검증으로 선택한 모델을 같은 지도와 환경 난수에서 실행합니다.
+    `selection.json`에 선택된 단계와 업데이트 수가 기록됩니다.
+    지도와 seed를 고르고 ‘지도 초기화’를 누른 뒤 한 걸음씩 또는 자동으로 실행하세요.
 ''')
-markdown("""
+code('''
+    selected = json.loads(SELECTION_PATH.read_text(encoding="utf-8"))
+    print("선택 모델:", selected["source"], "업데이트:", selected["step"])
+    comparison_demo = launch_navigation({
+        "시작 SFT": str(GRPO_DIR / "initial_sft.pt"),
+        "검증 선택": str(SELECTED_PATH),
+    }, CONFIG_PATH)
+''')
+markdown('''
     ## 4. 최종 테스트
 
-    세 단계의 학습을 마친 뒤 실행하세요. 검증과 다른 지도 seed를 사용합니다.
-    BFS는 매 이동 후 실제 위치에서 다시 계획합니다.
-    `optimal`은 실제 미끄러짐·보상·남은 행동 수를 고려한 유한 시간 최적 정책입니다.
-    SFT·GRPO·BFS·optimal의 도착률·추락률·평균 보상을 비교하세요.
-""")
+    GRPO 구간별 비교와 모델 선택을 마친 뒤 실행하세요. 검증과 다른 지도 seed를 사용합니다.
+    시작 SFT, 마지막 GRPO, 검증 선택 모델을 BFS·optimal과 비교합니다.
+    BFS는 현재 위치에서 다시 계획하고 optimal은 미끄러짐·보상·남은 행동 수를 고려합니다.
+''')
 code('''
-    final_test = report_navigation({"SFT": str(OUTPUT_DIR / "sft.pt"), "GRPO": str(OUTPUT_DIR / "grpo.pt")}, CONFIG_PATH, split="test")
+    final_test = report_navigation({
+        "시작 SFT": str(GRPO_DIR / "initial_sft.pt"),
+        "마지막 GRPO": str(GRPO_DIR / "grpo.pt"),
+        "검증 선택": str(SELECTED_PATH),
+    }, CONFIG_PATH, split="test")
 ''')
 markdown("""
     ## 5. 선택적 단계 생략 비교
@@ -214,7 +303,7 @@ markdown("""
     비교할 실험의 스위치를 `True`로 바꾸고 해당 셀을 실행하세요.
     사전학습 생략은 무작위 초기화 → SFT → GRPO,
     SFT 생략은 사전학습 → GRPO 순서입니다.
-    생략 실험은 별도 하위 폴더에 저장합니다. 같은 후속 단계 예산에서 검증 지표와 학습 시간을 비교하세요.
+    생략 실험은 별도 하위 폴더에 저장합니다. 사전학습 생략의 SFT는 위에서 지정한 총 업데이트 수를 사용합니다. 각 실험의 업데이트 수와 검증 지표를 비교하세요.
 """)
 code('''
     RUN_WITHOUT_PRETRAIN = False
@@ -225,16 +314,16 @@ code('''
         random_path = ablation_dir / "random_initialization.pt"
         save_checkpoint(random_path, random_model, config, "random_initialization", 0)
         del random_model
-        run_stage("sft", CONFIG_PATH, ablation_dir, initialize_from=random_path)
+        run_stage("sft", CONFIG_PATH, ablation_dir, steps=SFT_TOTAL_STEPS, initialize_from=random_path)
         run_stage("grpo", CONFIG_PATH, ablation_dir)
-        report_navigation({"전체 흐름": str(OUTPUT_DIR / "grpo.pt"), "사전학습 생략": str(ablation_dir / "grpo.pt")}, CONFIG_PATH)
+        report_navigation({"선택 모델": str(SELECTED_PATH), "사전학습 생략": str(ablation_dir / "grpo.pt")}, CONFIG_PATH)
 ''')
 code('''
     RUN_WITHOUT_SFT = False
     if RUN_WITHOUT_SFT:
         ablation_dir = OUTPUT_DIR / "without_sft"
         run_stage("grpo", CONFIG_PATH, ablation_dir, initialize_from=OUTPUT_DIR / "pretrain.pt")
-        report_navigation({"전체 흐름": str(OUTPUT_DIR / "grpo.pt"), "SFT 생략": str(ablation_dir / "grpo.pt")}, CONFIG_PATH)
+        report_navigation({"선택 모델": str(SELECTED_PATH), "SFT 생략": str(ablation_dir / "grpo.pt")}, CONFIG_PATH)
 ''')
 markdown("""
     ## 6. 체크포인트 다운로드
