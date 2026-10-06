@@ -49,7 +49,7 @@ def report_world(checkpoint, split="validation"):
     metrics = evaluate_world(model, encoder, payload["config"], split)
     write_json(Path(checkpoint).parent / f"{payload['stage']}_world_{split}.json", metrics)
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
-    print("TV distance와 KL은 낮을수록 좋습니다. 확률적 이동에서 단일 정답 정확도는 100%가 목표가 아닙니다.")
+    print("TV distance와 KL은 낮을수록, exact_support_probability는 높을수록 좋습니다.")
     return metrics
 
 
@@ -72,7 +72,7 @@ def report_navigation(checkpoints, config_path="configs/t4.json", split="validat
         rows += "<tr><th>" + html.escape(name) + "</th>" + "".join(f"<td>{entry}</td>" for entry in entries) + "</tr>"
     display(widgets.HTML("<table><tr><th>정책</th>" + "".join(f"<th>{name}</th>" for _, name in headings) + "</tr>" + rows + "</table>"))
     print(f"{split}: {metrics['maps']}개 지도 × {metrics['trials_per_map']}회. 모든 정책에 같은 지도·환경 난수를 적용했습니다.")
-    print("모델 행동은 argmax입니다. 평균 보상·도착률을 함께 비교하세요. 경로가 짧아져도 추락률이 높아지면 개선이라고 단정할 수 없습니다.")
+    print("모델 행동은 argmax입니다. 도착률·추락률·평균 보상을 함께 비교하세요.")
     return metrics
 
 
