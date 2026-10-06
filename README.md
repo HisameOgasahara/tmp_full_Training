@@ -8,6 +8,12 @@
 
 Colab에서 **T4 GPU**를 선택해 실행하세요.
 
+### SFT·PPO 반복 실패 진단
+
+[![진단 노트북을 Colab에서 열기](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/HisameOgasahara/tmp_full_Training/blob/experiment/loop-diagnosis/notebooks/Maze_Diagnosis.ipynb)
+
+진단에는 이전 학습에서 저장한 SFT·PPO 체크포인트(`.pt`)가 필요합니다. Drive에 저장했다면 진단 노트북에서 `USE_DRIVE = True`로 설정하고 체크포인트 경로를 맞추세요.
+
 ## 단계별 목표
 
 | 단계 | 학습 목표 | 확인할 능력 |
