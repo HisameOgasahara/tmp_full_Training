@@ -3,7 +3,7 @@
 작은 Transformer 하나를 **환경 규칙 사전학습 → BFS 행동 지도학습(SFT) → 환경 상호작용 GRPO** 순서로 학습합니다. 환경의 이동 규칙, 목표로 가는 행동, 위험과 이동 비용을 고려한 행동을 단계별로 익히는 것이 목적입니다. 각 단계가 끝나면 저장된 모델을 직접 실행하고 다음 단계로 넘어갑니다.
 
 <!-- COLAB_BADGE_START -->
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/HisameOgasahara/tmp_full_Training/blob/e508bb3149fa5ad7ab24fdc42bc28725f2981a6d/notebooks/Maze_Training.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/HisameOgasahara/tmp_full_Training/blob/3da8b1c04777a13f137acb9a4aed787958ed1175/notebooks/Maze_Training.ipynb)
 <!-- COLAB_BADGE_END -->
 
 ## Colab 실행 순서
