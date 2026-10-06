@@ -3,7 +3,7 @@
 작은 Transformer 하나로 **환경 규칙 사전학습 → BFS 행동 지도학습(SFT) → 환경 상호작용 GRPO**를 실습합니다. 단계마다 모델을 직접 실행해 이동 규칙 예측, 기본 길찾기, 위험과 이동 비용을 고려한 행동을 확인합니다.
 
 <!-- COLAB_BADGE_START -->
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/HisameOgasahara/tmp_full_Training/blob/fec0adb1b15eb3946c235ef116b0612af324363d/notebooks/Maze_Training.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/HisameOgasahara/tmp_full_Training/blob/081500fd7af43494c1edbf832b18eb33e8408e93/notebooks/Maze_Training.ipynb)
 <!-- COLAB_BADGE_END -->
 
 Colab에서 **T4 GPU**를 선택해 실행하세요.
