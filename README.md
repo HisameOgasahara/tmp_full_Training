@@ -3,7 +3,7 @@
 작은 Transformer 하나로 **이동 위치·비용 사전학습 → BFS SFT → PPO**를 실습합니다. 벽을 피해 목표에 도착하고, 짧은 늪길과 긴 일반 길 중 총비용이 작은 경로를 학습합니다.
 
 <!-- COLAB_BADGE_START -->
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/HisameOgasahara/tmp_full_Training/blob/d5fb336341e961fdc934d10034b55d004bcb9ede/notebooks/Maze_Training.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/HisameOgasahara/tmp_full_Training/blob/390e2983f52a37c9a838ea0ca590ea8c678f1a54/notebooks/Maze_Training.ipynb)
 <!-- COLAB_BADGE_END -->
 
 Colab에서 **T4 GPU**를 선택해 실행하세요.
