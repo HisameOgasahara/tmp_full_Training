@@ -37,7 +37,10 @@
   "sft": {
     "steps": 4000,
     "batch_size": 64,
-    "learning_rate": 0.0002
+    "learning_rate": 0.0002,
+    "correction_every": 100,
+    "correction_maps": 32,
+    "correction_weight": 4.0
   },
   "training": {
     "log_every": 50,
@@ -63,6 +66,10 @@
     "entropy_coefficient": 0.01,
     "gamma": 1.0,
     "gae_lambda": 0.95,
-    "target_kl": 0.02
+    "target_kl": 0.02,
+    "critic_learning_rate": 0.0003,
+    "value_warmup_epochs": 10,
+    "reference_kl_coefficient": 0.05,
+    "potential_scale": 0.1
   }
 }

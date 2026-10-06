@@ -58,5 +58,5 @@ class MazeTransformer(nn.Module):
         features = self.norm_final(x[:, -1])
         logits = F.linear(features, self.embed_tokens.weight, self.output_bias)
         if with_auxiliary:
-            return logits, self.predict_cost(features).squeeze(-1), self.predict_value(features).squeeze(-1)
+            return logits, self.predict_cost(features).squeeze(-1), self.predict_value(features.detach()).squeeze(-1)
         return logits

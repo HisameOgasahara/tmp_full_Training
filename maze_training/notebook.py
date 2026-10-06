@@ -11,7 +11,7 @@ from matplotlib.colors import ListedColormap
 import ipywidgets as widgets
 from IPython.display import display, clear_output
 from .environment import ACTION_NAMES, FLOOR, WALL, MUD, GOAL, generate_maze, make_demo_maze, step_environment
-from .evaluation import evaluate_world, evaluate_navigation, predict_action_probabilities
+from .evaluation import evaluate_world, evaluate_navigation, predict_action_probabilities, evaluate_actions
 from .runtime import load_model, read_config, write_json, mixed_precision
 
 TILE_COLORS = ("#f1f5f9", "#334155", "#d6a15e", "#86efac")
@@ -53,6 +53,14 @@ def report_world(checkpoint, split="validation"):
     return metrics
 
 
+def report_actions(checkpoint,split="validation"):
+    model,encoder,payload=load_model(checkpoint)
+    metrics=evaluate_actions(model,encoder,payload["config"],split)
+    write_json(Path(checkpoint).parent/f"{payload['stage']}_actions_{split}.json",metrics)
+    print(json.dumps(metrics,ensure_ascii=False,indent=2))
+    return metrics
+
+
 def report_navigation(checkpoints, config_path="configs/t4.json", split="validation"):
     config = read_config(config_path)
     policies = {"BFS": "bfs", "Dijkstra": "dijkstra"}
@@ -65,14 +73,14 @@ def report_navigation(checkpoints, config_path="configs/t4.json", split="validat
     if checkpoints:
         parent = Path(next(iter(checkpoints.values()))).parent
         write_json(parent / f"navigation_{split}.json", metrics)
-    headings = (("success_rate", "도착률"), ("timeout_rate", "시간초과율"), ("mean_return", "평균 보상"), ("mean_cost_success", "성공 시 비용"), ("mean_excess_cost_success", "최소 비용 대비 초과"), ("mean_steps_success", "성공 시 이동 수"), ("mean_collisions", "충돌 수"))
+    headings = (("success_rate", "도착률"), ("timeout_rate", "시간초과율"), ("loop_rate", "반복률"), ("mean_return", "평균 보상"), ("mean_cost_success", "성공 시 비용"), ("mean_excess_cost_success", "최소 비용 대비 초과"), ("mean_steps_success", "성공 시 이동 수"), ("mean_collisions", "충돌 수"))
     rows = ""
     for name, values in metrics["policies"].items():
         entries = ["—" if values[key] is None else f"{values[key]:.3f}" for key, _ in headings]
         rows += "<tr><th>" + html.escape(name) + "</th>" + "".join(f"<td>{entry}</td>" for entry in entries) + "</tr>"
     display(widgets.HTML("<table><tr><th>정책</th>" + "".join(f"<th>{name}</th>" for _, name in headings) + "</tr>" + rows + "</table>"))
     print(f"{split}: 같은 미로 {metrics['maps']}개, 모델 행동은 argmax입니다.")
-    print("도착률·평균 보상을 먼저 비교하고 성공 시 비용과 초과 비용을 확인하세요.")
+    print("반복률은 같은 위치를 재방문한 지도 비율입니다. 벽 방향은 학습·평가·실행에서 동일하게 제외합니다.")
     return metrics
 
 
@@ -185,12 +193,12 @@ def launch_navigation(checkpoints, config_path="configs/t4.json"):
             plt.show()
             plt.close(figure)
             for name, episode in state["episodes"].items():
-                print(f"{name}: {episode['status']} | 총비용 {episode['cost']:g} | 충돌 {episode['collisions']}회")
+                print(f"{name}: {episode['status']} | 총비용 {episode['cost']:g} | 충돌 {episode['collisions']}회 | 재방문 {episode['revisits']}회")
 
     def reset(_=None):
         maze = make_demo_maze(rules) if choice.value == "demo" else generate_maze(seed.value, rules)
         state["maze"] = maze
-        state["episodes"] = {name:{"position":maze.start,"path":[maze.start],"steps":0,"cost":0.0,"collisions":0,"done":False,"status":"진행 중"} for name in models}
+        state["episodes"] = {name:{"position":maze.start,"path":[maze.start],"steps":0,"cost":0.0,"collisions":0,"revisits":0,"seen":{maze.start},"done":False,"status":"진행 중"} for name in models}
         render()
 
     def advance(_=None):
@@ -201,6 +209,8 @@ def launch_navigation(checkpoints, config_path="configs/t4.json"):
                 continue
             action = int(predict_action_probabilities(model, encoder, [state["maze"]], [episode["position"]]).argmax(-1)[0])
             outcome = step_environment(state["maze"], episode["position"], action, rules)
+            episode["revisits"] += int(outcome.position in episode["seen"])
+            episode["seen"].add(outcome.position)
             episode["position"] = outcome.position
             episode["path"].append(outcome.position)
             episode["steps"] += 1

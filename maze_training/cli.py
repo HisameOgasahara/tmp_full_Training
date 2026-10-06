@@ -11,7 +11,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("task", choices=("world", "navigation"))
     parser.add_argument("--config", default="configs/t4.json")
-    parser.add_argument("--output-dir", default="runs/weighted_maze/t4")
+    parser.add_argument("--output-dir", default="runs/weighted_maze_v2/t4")
     parser.add_argument("--split", choices=("validation", "test"), default="validation")
     arguments = parser.parse_args()
     config = read_config(arguments.config)

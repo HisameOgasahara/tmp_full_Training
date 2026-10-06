@@ -1,7 +1,7 @@
 """Disjoint seeded maps and exact transition/cost/BFS labels."""
 
 import numpy as np
-from .environment import WALL, GOAL, generate_maze, find_bfs_path, get_path_actions, step_environment
+from .environment import WALL, GOAL, generate_maze, find_bfs_path, get_path_actions, step_environment, compute_goal_distances, move_nominal
 
 SPLIT_OFFSETS = {"train": 0, "validation": 1_000_000, "test": 2_000_000}
 
@@ -28,12 +28,16 @@ def sample_world_batch(maps, encoder, rules, count, rng):
 
 
 def build_expert_examples(maps, encoder):
-    queries, labels = [], []
+    queries, targets = [], []
     for maze in maps:
-        for row, column in np.argwhere((maze.grid != WALL) & (maze.grid != GOAL)):
-            position = (int(row), int(column))
-            path = find_bfs_path(maze, position)
-            if len(path) > 1:
-                queries.append(encoder.encode_query(maze, position))
-                labels.append(get_path_actions(path)[0])
-    return np.asarray(queries), np.asarray(labels)
+        distances = compute_goal_distances(maze)
+        for position, distance in distances.items():
+            if distance == 0:
+                continue
+            optimal = []
+            for action in range(4):
+                neighbor, collision = move_nominal(maze, position, action)
+                optimal.append(not collision and distances.get(neighbor) == distance - 1)
+            queries.append(encoder.encode_query(maze, position))
+            targets.append(optimal)
+    return np.asarray(queries), np.asarray(targets, dtype=bool)

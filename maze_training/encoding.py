@@ -1,7 +1,7 @@
 """Encode grids and queries with a small explicit vocabulary, without a tokenizer."""
 
 import numpy as np
-from .environment import WALL
+from .environment import WALL, ACTION_DELTAS
 
 
 class MazeEncoder:
@@ -42,3 +42,17 @@ class MazeEncoder:
     @property
     def position_slice(self):
         return slice(self.position_offset, self.position_offset + self.position_count)
+
+    def decode_action_masks(self, queries):
+        """Read local neighbors from encoded maps; no route information is used."""
+        queries = np.asarray(queries)
+        grids = queries[:, 2:2+self.position_count].reshape(-1,self.max_size,self.max_size)
+        positions = queries[:, 2+self.position_count] - self.position_offset
+        masks = np.zeros((len(queries),4), dtype=bool)
+        sizes = queries[:,1]-self.size_offset
+        for index, (grid, position, size) in enumerate(zip(grids, positions, sizes)):
+            row,column = divmod(int(position),self.max_size)
+            for action,(dr,dc) in enumerate(ACTION_DELTAS):
+                r,c = row+dr,column+dc
+                masks[index,action] = 0<=r<size and 0<=c<size and grid[r,c]!=WALL
+        return masks

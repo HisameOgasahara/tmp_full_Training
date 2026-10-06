@@ -5,6 +5,7 @@ import torch
 from .data import build_maps, sample_world_batch
 from .environment import WALL, GOAL, step_environment, find_bfs_path, find_min_cost_path, get_path_actions, calculate_path_cost
 from .runtime import mixed_precision
+from .policy import build_action_masks, mask_action_logits
 
 
 @torch.no_grad()
@@ -13,7 +14,7 @@ def predict_action_probabilities(model, encoder, mazes, positions):
     tokens = torch.tensor([encoder.encode_query(maze, state) for maze, state in zip(mazes, positions)], device=device)
     with mixed_precision(device):
         logits = model(tokens)[:, encoder.action_slice].float()
-    return logits.softmax(-1)
+    return mask_action_logits(logits, build_action_masks(mazes, positions)).softmax(-1)
 
 
 @torch.no_grad()
@@ -44,7 +45,7 @@ def evaluate_navigation(config, policies, split="validation"):
     results = {}
     for name, policy in policies.items():
         positions = [maze.start for maze in maps]
-        records = [{"success":False, "return":0.0, "cost":0.0, "steps":0, "collisions":0} for _ in maps]
+        records = [{"success":False, "return":0.0, "cost":0.0, "steps":0, "collisions":0,"seen":{maze.start},"loop":False} for maze in maps]
         active = list(range(len(maps)))
         for _ in range(rules["max_steps"]):
             if not active:
@@ -71,6 +72,8 @@ def evaluate_navigation(config, policies, split="validation"):
                 record["steps"] += 1
                 record["collisions"] += int(outcome.collision)
                 record["success"] = outcome.success
+                record["loop"] |= outcome.position in record["seen"] and not outcome.done
+                record["seen"].add(outcome.position)
                 if not outcome.done:
                     remaining.append(index)
             active = remaining
@@ -78,6 +81,7 @@ def evaluate_navigation(config, policies, split="validation"):
         excess = [r["cost"] - minimum_costs[i] for i, r in enumerate(records) if r["success"]]
         mean_success = lambda key: float(np.mean([r[key] for r in successful])) if successful else None
         results[name] = {
+            "loop_rate":float(np.mean([r["loop"] for r in records])),
             "episodes":len(maps), "success_rate":len(successful)/len(maps), "timeout_rate":len(active)/len(maps),
             "mean_return":float(np.mean([r["return"] for r in records])),
             "mean_cost_all":float(np.mean([r["cost"] for r in records])),
@@ -86,3 +90,26 @@ def evaluate_navigation(config, policies, split="validation"):
             "mean_collisions":float(np.mean([r["collisions"] for r in records])),
         }
     return {"split":split, "maps":len(maps), "policies":results}
+
+
+@torch.no_grad()
+def evaluate_actions(model, encoder, config, split="validation"):
+    """Report route correctness and raw wall probability on reachable states."""
+    from .data import build_expert_examples
+    maps = build_maps(config, split)
+    queries, targets = build_expert_examples(maps, encoder)
+    device = next(model.parameters()).device
+    masks = encoder.decode_action_masks(queries)
+    raw_correct, masked_correct, wall_mass = [], [], []
+    model.eval()
+    for start in range(0, len(queries), config["evaluation"]["batch_size"]):
+        stop = start + config["evaluation"]["batch_size"]
+        with mixed_precision(device):
+            logits = model(torch.tensor(queries[start:stop], device=device))[:, encoder.action_slice].float()
+        raw = logits.softmax(-1).cpu().numpy()
+        masked = mask_action_logits(logits, masks[start:stop]).argmax(-1).cpu().numpy()
+        labels = targets[start:stop]
+        raw_correct.extend(labels[np.arange(len(labels)), raw.argmax(-1)].tolist())
+        masked_correct.extend(labels[np.arange(len(labels)), masked].tolist())
+        wall_mass.extend((raw * ~masks[start:stop]).sum(-1).tolist())
+    return {"split":split,"states":len(queries),"raw_bfs_action_accuracy":float(np.mean(raw_correct)),"masked_bfs_action_accuracy":float(np.mean(masked_correct)),"raw_wall_probability":float(np.mean(wall_mass))}

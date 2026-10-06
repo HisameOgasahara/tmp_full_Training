@@ -61,6 +61,20 @@ def reconstruct_path(parent, target):
     return path[::-1]
 
 
+def compute_goal_distances(maze):
+    """Exact unweighted distances for BFS supervision and potential shaping."""
+    distances = {maze.goal: 0}
+    queue = deque([maze.goal])
+    while queue:
+        position = queue.popleft()
+        for action in range(4):
+            target, collision = move_nominal(maze, position, action)
+            if not collision and target not in distances:
+                distances[target] = distances[position] + 1
+                queue.append(target)
+    return distances
+
+
 def find_bfs_path(maze, start=None):
     start = maze.start if start is None else start
     queue, parent = deque([start]), {start: None}
